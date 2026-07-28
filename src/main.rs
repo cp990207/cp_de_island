@@ -7,7 +7,8 @@ mod windowing;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
-use windowing::{COLLAPSED_H, COLLAPSED_W, ISLAND_BLEED};
+use std::time::Duration;
+use windowing::{COLLAPSED_W, ISLAND_BLEED, WINDOW_H, WINDOW_W};
 
 #[cfg(target_os = "windows")]
 use dioxus::desktop::tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
@@ -19,8 +20,8 @@ fn main() {
 }
 
 fn desktop_config() -> Config {
-    let initial_w = COLLAPSED_W + ISLAND_BLEED * 2.0;
-    let initial_h = COLLAPSED_H + ISLAND_BLEED * 2.0;
+    let initial_w = WINDOW_W;
+    let initial_h = WINDOW_H;
 
     let mut window = WindowBuilder::new()
         .with_title("Memo Pill")
@@ -53,10 +54,21 @@ fn desktop_config() -> Config {
         })
 }
 
+fn local_time_hm() -> String {
+    let now =
+        time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    format!("{:02}:{:02}", now.hour(), now.minute())
+}
+
 #[component]
 fn App() -> Element {
     let desktop = dioxus::desktop::window();
     let mut expanded = use_signal(|| false);
+    let mut hovered = use_signal(|| false);
+    let mut show_time = use_signal(|| false);
+    let mut face_expr = use_signal(|| 0u8);
+    let mut clock_text = use_signal(local_time_hm);
+    let mut hover_gen = use_signal(|| 0u64);
     let mut memos = use_signal(storage::load_memos);
     let mut input_text = use_signal(String::new);
     let mut editing_id = use_signal(|| None::<String>);
@@ -66,12 +78,49 @@ fn App() -> Element {
         storage::save_memos(&memos.read());
     });
 
+    // The window is fixed-size and click-through: poll the cursor against the
+    // live hot regions and only make the window interactive when the cursor is
+    // actually over the island or the panel.
     {
-        let desktop = desktop.clone();
-        use_effect(move || {
-            windowing::set_window_size(&desktop, expanded());
+        let d = desktop.clone();
+        use_future(move || {
+            let d = d.clone();
+            async move {
+                let mut interactive = true;
+                loop {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    let wide = *hovered.peek() || *expanded.peek();
+                    let rects = windowing::hot_rects(&d.window, *expanded.peek(), wide);
+                    let want = windowing::cursor_inside(&rects);
+                    if want != interactive {
+                        interactive = want;
+                        windowing::set_click_through(&d.window, !want);
+                    }
+                }
+            }
         });
     }
+
+    // Alternate between the face and the clock while idle; keep the clock fresh.
+    use_future(move || async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            clock_text.set(local_time_hm());
+            if *expanded.peek() || *hovered.peek() {
+                continue;
+            }
+            let next_show_time = !*show_time.peek();
+            if !next_show_time {
+                let current = *face_expr.peek();
+                let mut next = uuid::Uuid::new_v4().as_bytes()[0] % FACE_COUNT;
+                if next == current {
+                    next = (next + 1) % FACE_COUNT;
+                }
+                face_expr.set(next);
+            }
+            show_time.set(next_show_time);
+        }
+    });
 
     let memo_count = memos.read().len();
     let latest_time = memos
@@ -89,6 +138,18 @@ fn App() -> Element {
     };
 
     let chevron_visible = expanded() && memo_count > 0;
+
+    let island_class = if !expanded() && !hovered() {
+        if show_time() {
+            "island circle show-time"
+        } else {
+            "island circle"
+        }
+    } else {
+        "island"
+    };
+
+    let face_class = format!("circle-face face-{}", face_expr());
 
     let stage_class = if expanded() {
         "stage visual-expanded"
@@ -158,8 +219,28 @@ fn App() -> Element {
                 move |_| d.close()
             },
             section {
-                class: "island",
-                onclick: move |_| expanded.toggle(),
+                class: "{island_class}",
+                onmouseenter: move |_| {
+                    *hover_gen.write() += 1;
+                    hovered.set(true);
+                },
+                onmouseleave: move |_| {
+                    if *expanded.peek() {
+                        return;
+                    }
+                    *hover_gen.write() += 1;
+                    let generation = *hover_gen.read();
+                    spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        if *hover_gen.peek() != generation {
+                            return;
+                        }
+                        hovered.set(false);
+                    });
+                },
+                onclick: move |_| {
+                    expanded.toggle();
+                },
                 onmousedown: {
                     let d = desktop.clone();
                     move |evt: MouseEvent| {
@@ -180,6 +261,13 @@ fn App() -> Element {
                         span { class: "pill-time", "{latest_time}" }
                     }
                 }
+                div {
+                    class: "{face_class}",
+                    span { class: "eye left" }
+                    span { class: "eye right" }
+                    span { class: "mouth" }
+                }
+                span { class: "circle-clock", "{clock_text.read()}" }
                 if chevron_visible {
                     span { class: "pill-chevron", "▾" }
                 }
@@ -307,3 +395,5 @@ fn App() -> Element {
 }
 
 const CSS: &str = include_str!("app.css");
+
+const FACE_COUNT: u8 = 8;
