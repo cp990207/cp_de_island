@@ -12,11 +12,11 @@ This project is in early development — a personal-use utility.
 
 - **Three-state island**
   - Rests as a 48px circle at the top center of the screen
-  - Smoothly expands into a 280px pill on hover, showing memo count and last-updated time
-  - Click the pill to open the 400px memo panel; click again to collapse
+  - Smoothly expands into a 280px pill on hover, showing the open-task count plus the nearest due time or overdue count
+  - Click the pill to open the 400px task panel; click again to collapse
   - Automatically shrinks back to the circle 1s after the cursor leaves
 - **Faces & clock** — a CSS-drawn blinking face (8 expressions in random rotation, including heart eyes, sleepy breathing and dizzy) alternating with an HH:MM clock every 5s
-- **Quick notes** — add / edit / delete short memos, Enter to save, persisted automatically
+- **Quick tasks** — press Enter to capture; every attribute is optional: 📅 due time (Today / Tomorrow / +7d / custom date & time) and a ⚑ three-level priority flag (Low / Medium / High, click to cycle); click the circle on a task to complete it — it strikes through and sinks into the Completed group, click again to restore; overdue tasks turn red, and 10 minutes before a due time the island pops open and flashes the task as a visual reminder; edit mode can change due and priority too; deletions can be undone within 6s, search appears with 5+ tasks, hover a row to see its full text
 - **Smooth animation** — asymmetric spring expand/collapse curves, jelly bounce, cross-fading content
 - **Flicker-free rendering** — the window has a fixed size and is never resized (avoiding WebView2 resize flashes); transparent areas are click-through and never block apps underneath
 
@@ -26,9 +26,13 @@ This project is in early development — a personal-use utility.
 | --- | --- |
 | Hover | Circle expands into the pill |
 | Move cursor away | Shrinks back to the circle after 1s |
-| Left click | Open / collapse the memo panel |
-| Shift + left-drag | Move the window |
-| Right click | Quit the app |
+| Left click | Open / collapse the task panel |
+| Esc / click the margin outside the panel | Collapse the task panel |
+| Circle on a task | Complete / restore the task |
+| 📅 / ⚑ next to the input | Set due time / priority for the new task |
+| Chips row while editing | Change that task's due time and priority |
+| Shift + left-drag | Move the window (position persists across restarts) |
+| Right click (on the circle / pill) | Quit the app |
 
 ## Planned Features
 
@@ -56,7 +60,7 @@ cargo run
 
 ## Data Storage
 
-Memos are persisted as JSON to `%APPDATA%/MemoPill/memos.json`.
+Tasks are persisted as JSON to `%APPDATA%/MemoPill/memos.json`. Writes use a temp file + atomic replace; a corrupt data file is backed up as `memos.corrupt-<timestamp>.json` instead of being overwritten. Data files from the older notes-only version load and upgrade automatically. The app runs as a single instance so concurrent processes cannot clobber each other's data. The window position (after a Shift+drag) is saved to `settings.json` in the same directory and restored on restart; if the saved spot no longer overlaps any monitor (e.g. the display layout changed), the window falls back to top center.
 
 ## License
 

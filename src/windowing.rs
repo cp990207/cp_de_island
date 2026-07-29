@@ -1,5 +1,6 @@
-use dioxus::desktop::tao::window::Window;
 use dioxus::desktop::LogicalPosition;
+use dioxus::desktop::tao::dpi::PhysicalPosition;
+use dioxus::desktop::tao::window::Window;
 
 pub const CIRCLE_SIZE: f64 = 48.0;
 pub const COLLAPSED_W: f64 = 280.0;
@@ -16,8 +17,34 @@ pub const WINDOW_W: f64 = EXPANDED_W + ISLAND_BLEED * 2.0;
 pub const WINDOW_H: f64 = EXPANDED_H + ISLAND_BLEED * 2.0;
 
 const TOP_MARGIN: f64 = 8.0;
-const PANEL_MARGIN_TOP: f64 = 8.0;
-const PANEL_SHELL_H: f64 = 430.0;
+
+/// Restore the position saved by the last drag. Returns false when there is
+/// no saved position or it no longer overlaps any monitor (display layout
+/// changed since), so the caller should fall back to `place_top_center`.
+/// Everything is in physical pixels, matching `Window::outer_position`.
+pub fn restore_position(window: &Window) -> bool {
+    let Some((x, y)) = crate::storage::load_window_pos() else {
+        return false;
+    };
+    let scale = window.scale_factor();
+    let w = (WINDOW_W * scale) as i32;
+    let h = (WINDOW_H * scale) as i32;
+    // At least 40px of the window must be on-screen on some monitor, or it
+    // would be stranded where the user can no longer grab it.
+    let visible = window.available_monitors().any(|m| {
+        let mp = m.position();
+        let ms = m.size();
+        x + w > mp.x + 40
+            && x < mp.x + ms.width as i32 - 40
+            && y + h > mp.y + 40
+            && y < mp.y + ms.height as i32 - 40
+    });
+    if !visible {
+        return false;
+    }
+    window.set_outer_position(PhysicalPosition::new(x, y));
+    true
+}
 
 pub fn place_top_center(window: &Window, width: f64) {
     if let Some(monitor) = window
@@ -35,6 +62,10 @@ pub fn place_top_center(window: &Window, width: f64) {
 /// Hot regions (physical px, left/top/right/bottom) where the window must
 /// stay interactive: the island itself, plus the panel while expanded.
 /// Everywhere else the fixed-size window is transparent and click-through.
+///
+/// While expanded the whole window becomes interactive: clicks landing on the
+/// transparent margin are used to collapse the panel (popover behavior), so
+/// they must not fall through to apps underneath.
 pub fn hot_rects(window: &Window, expanded: bool, island_wide: bool) -> Vec<(i32, i32, i32, i32)> {
     let scale = window.scale_factor();
     let Ok(pos) = window.outer_position() else {
@@ -58,19 +89,14 @@ pub fn hot_rects(window: &Window, expanded: bool, island_wide: bool) -> Vec<(i32
         )
     };
 
+    if expanded {
+        return vec![to_rect(0.0, 0.0, WINDOW_W, WINDOW_H)];
+    }
+
     // The island is centered in the stage's content box (bleed + EXPANDED_W).
     let island_w = if island_wide { COLLAPSED_W } else { CIRCLE_SIZE };
     let island_x = ISLAND_BLEED + (EXPANDED_W - island_w) / 2.0;
-    let mut rects = vec![to_rect(island_x, ISLAND_BLEED, island_w, COLLAPSED_H)];
-    if expanded {
-        rects.push(to_rect(
-            ISLAND_BLEED,
-            ISLAND_BLEED + COLLAPSED_H + PANEL_MARGIN_TOP,
-            EXPANDED_W,
-            PANEL_SHELL_H,
-        ));
-    }
-    rects
+    vec![to_rect(island_x, ISLAND_BLEED, island_w, COLLAPSED_H)]
 }
 
 #[cfg(target_os = "windows")]

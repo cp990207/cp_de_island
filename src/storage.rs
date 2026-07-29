@@ -1,25 +1,136 @@
 use crate::memo::Memo;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+// v2 adds task fields (done/completed_at/priority/due) to Memo. They all
+// carry serde(default), so v1 files — and the legacy bare array — load
+// unchanged; the next save writes the enriched records.
+const CURRENT_VERSION: u32 = 2;
+
+/// On-disk schema. `version` allows future migrations; the loader also
+/// accepts the legacy format (a bare JSON array of memos).
+#[derive(Serialize, Deserialize)]
+struct MemoFile {
+    version: u32,
+    memos: Vec<Memo>,
+}
+
 fn data_file() -> PathBuf {
-    let base = std::env::var("APPDATA")
-        .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(base).join("MemoPill").join("memos.json")
+    if let Ok(base) = std::env::var("APPDATA") {
+        return PathBuf::from(base).join("MemoPill").join("memos.json");
+    }
+    // Fallback: next to the executable. Never the current working directory —
+    // it changes with the launch context and would scatter data files around.
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    dir.join("MemoPill").join("memos.json")
+}
+
+/// Window placement, kept in a separate settings file so the memos rewrite
+/// cycle never has to know about it.
+#[derive(Serialize, Deserialize)]
+struct SettingsFile {
+    window_x: i32,
+    window_y: i32,
+}
+
+fn settings_file() -> PathBuf {
+    data_file().with_file_name("settings.json")
+}
+
+pub fn load_window_pos() -> Option<(i32, i32)> {
+    let json = std::fs::read_to_string(settings_file()).ok()?;
+    let s: SettingsFile = serde_json::from_str(&json).ok()?;
+    Some((s.window_x, s.window_y))
+}
+
+pub fn save_window_pos(x: i32, y: i32) {
+    let path = settings_file();
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("[memo-pill] failed to create settings dir: {e}");
+            return;
+        }
+    }
+    let Ok(json) = serde_json::to_string(&SettingsFile {
+        window_x: x,
+        window_y: y,
+    }) else {
+        return;
+    };
+    // Same atomic-replace pattern as the memos file.
+    let tmp = path.with_extension("tmp");
+    if let Err(e) = std::fs::write(&tmp, &json) {
+        eprintln!("[memo-pill] failed to write {}: {e}", tmp.display());
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        eprintln!("[memo-pill] failed to replace {}: {e}", path.display());
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 pub fn load_memos() -> Vec<Memo> {
-    std::fs::read_to_string(data_file())
-        .ok()
-        .and_then(|json| serde_json::from_str(&json).ok())
-        .unwrap_or_default()
+    let path = data_file();
+    let json = match std::fs::read_to_string(&path) {
+        Ok(json) => json,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            eprintln!("[memo-pill] failed to read {}: {e}", path.display());
+            return Vec::new();
+        }
+    };
+
+    // New envelope format first, then the legacy bare-array format.
+    let parsed = serde_json::from_str::<MemoFile>(&json)
+        .map(|f| f.memos)
+        .or_else(|_| serde_json::from_str::<Vec<Memo>>(&json));
+
+    match parsed {
+        Ok(memos) => memos,
+        Err(e) => {
+            // Data corruption must never be silently overwritten: back the
+            // original file aside so the user can recover it manually.
+            eprintln!("[memo-pill] corrupt data file {}: {e}", path.display());
+            let backup = path.with_file_name(format!(
+                "memos.corrupt-{}.json",
+                crate::memo::unix_now()
+            ));
+            match std::fs::copy(&path, &backup) {
+                Ok(_) => eprintln!("[memo-pill] corrupt file backed up to {}", backup.display()),
+                Err(be) => eprintln!("[memo-pill] failed to back up corrupt file: {be}"),
+            }
+            Vec::new()
+        }
+    }
 }
 
 pub fn save_memos(memos: &[Memo]) {
     let path = data_file();
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("[memo-pill] failed to create data dir: {e}");
+            return;
+        }
     }
-    if let Ok(json) = serde_json::to_string_pretty(memos) {
-        let _ = std::fs::write(&path, json);
+    let file = MemoFile {
+        version: CURRENT_VERSION,
+        memos: memos.to_vec(),
+    };
+    let Ok(json) = serde_json::to_string_pretty(&file) else {
+        return;
+    };
+    // Atomic replace: write a temp file, then rename over the target. A crash
+    // mid-write can never leave a truncated memos.json behind.
+    let tmp = path.with_extension("tmp");
+    if let Err(e) = std::fs::write(&tmp, &json) {
+        eprintln!("[memo-pill] failed to write {}: {e}", tmp.display());
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        eprintln!("[memo-pill] failed to replace {}: {e}", path.display());
+        let _ = std::fs::remove_file(&tmp);
     }
 }

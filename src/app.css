@@ -428,6 +428,7 @@ button {
 }
 
 .panel {
+  position: relative;
   width: 400px;
   height: 422px;
   padding: 16px;
@@ -493,6 +494,110 @@ button {
   transform: scale(0.94);
 }
 
+.add-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.add-btn:disabled:hover {
+  background: var(--accent);
+}
+
+.add-btn:disabled:active {
+  transform: none;
+}
+
+.search-row {
+  flex-shrink: 0;
+}
+
+.search-input {
+  width: 100%;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 10px;
+  background: var(--bg-input);
+  font-size: 12px;
+  font-weight: 520;
+  color: var(--text-primary);
+  transition: background var(--motion-fast) ease,
+    box-shadow var(--motion-fast) ease;
+}
+
+.search-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.search-input:focus {
+  background: rgba(0, 0, 0, 0.02);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.no-match {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+
+.no-match p {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 520;
+  color: var(--text-secondary);
+}
+
+.undo-toast {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px 8px 14px;
+  border-radius: 12px;
+  background: rgba(32, 32, 32, 0.88);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  animation: toastSlideIn 220ms var(--motion-spring) both;
+}
+
+.undo-text {
+  font-size: 12px;
+  font-weight: 540;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.undo-btn {
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 650;
+  color: #8fbfff;
+  transition: transform var(--motion-fast) var(--motion-spring),
+    background var(--motion-fast) ease;
+}
+
+.undo-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.undo-btn:active {
+  transform: scale(0.94);
+}
+
+@keyframes toastSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .memo-list {
   flex: 1;
   min-height: 0;
@@ -518,7 +623,7 @@ button {
 .memo-item {
   min-height: 48px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 60px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 10px 14px;
@@ -534,7 +639,12 @@ button {
 }
 
 .memo-item.editing {
-  grid-template-columns: minmax(0, 1fr) 70px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.memo-item.editing .edit-actions {
+  align-self: center;
 }
 
 .memo-text {
@@ -727,5 +837,272 @@ button {
   button {
     animation: none;
     transition: opacity 120ms ease, background 120ms ease;
+  }
+}
+
+/* --- Task attributes: checkbox, priority flag, due date --- */
+
+.check-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: transparent;
+  flex-shrink: 0;
+  justify-self: start;
+  transition: transform var(--motion-fast) var(--motion-spring),
+    background var(--motion-fast) ease, border-color var(--motion-fast) ease;
+}
+
+.check-btn:hover {
+  border-color: var(--accent);
+}
+
+.check-btn:active {
+  transform: scale(0.88);
+}
+
+.check-btn.checked {
+  background: #34c759;
+  border-color: #34c759;
+  color: rgba(255, 255, 255, 0.96);
+}
+
+.memo-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.memo-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 14px;
+}
+
+.memo-item.done .memo-text {
+  text-decoration: line-through;
+  color: var(--text-tertiary);
+}
+
+.meta-flag {
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.meta-flag.p-low {
+  color: #0a84ff;
+}
+
+.meta-flag.p-med {
+  color: #ff9500;
+}
+
+.meta-flag.p-high {
+  color: #ff3b30;
+}
+
+.meta-due {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.meta-due.overdue {
+  color: #ff3b30;
+}
+
+.pill-time.pill-overdue {
+  color: #ff3b30;
+  font-weight: 650;
+}
+
+/* Attribute buttons beside the add-input (📅 / ⚑) */
+
+.attr-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: var(--bg-input);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  transition: transform var(--motion-fast) var(--motion-spring),
+    background var(--motion-fast) ease, color var(--motion-fast) ease;
+}
+
+.attr-btn:hover {
+  background: rgba(0, 0, 0, 0.07);
+  color: var(--text-secondary);
+}
+
+.attr-btn:active {
+  transform: scale(0.94);
+}
+
+.attr-btn.active {
+  color: var(--accent);
+  background: var(--accent-light);
+}
+
+.attr-btn.p-low {
+  color: #0a84ff;
+}
+
+.attr-btn.p-med {
+  color: #ff9500;
+}
+
+.attr-btn.p-high {
+  color: #ff3b30;
+}
+
+/* Due-date / priority chips (under the add-input and in edit mode) */
+
+.due-chips,
+.edit-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.chip {
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: var(--bg-input);
+  font-size: 11px;
+  font-weight: 540;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition: background var(--motion-fast) ease, color var(--motion-fast) ease;
+}
+
+.chip:hover {
+  background: rgba(0, 0, 0, 0.07);
+  color: var(--text-primary);
+}
+
+.chip.clear {
+  padding: 0 8px;
+}
+
+.prio-chip {
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: var(--bg-input);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition: background var(--motion-fast) ease, color var(--motion-fast) ease;
+}
+
+.prio-chip:hover {
+  background: rgba(0, 0, 0, 0.07);
+}
+
+.prio-chip.p-low {
+  color: #0a84ff;
+}
+
+.prio-chip.p-med {
+  color: #ff9500;
+}
+
+.prio-chip.p-high {
+  color: #ff3b30;
+}
+
+.due-current {
+  font-size: 11px;
+  font-weight: 620;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.date-input {
+  height: 26px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--bg-input);
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+/* Edit-mode body: input stacked over the attribute chips */
+
+.edit-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-self: center;
+}
+
+.edit-input {
+  width: 100%;
+}
+
+/* Completed group */
+
+.completed-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 620;
+  color: var(--text-secondary);
+  text-align: left;
+  flex-shrink: 0;
+  transition: background var(--motion-fast) ease;
+}
+
+.completed-header:hover {
+  background: var(--bg-item-hover);
+}
+
+.completed-chevron {
+  font-size: 9px;
+  width: 10px;
+}
+
+/* Due-soon flash: the row pulses when its due time is close */
+
+.memo-item.flash {
+  animation: dueFlash 900ms ease-in-out 6;
+}
+
+@keyframes dueFlash {
+  0%,
+  100% {
+    background: var(--bg-item);
+  }
+  50% {
+    background: rgba(255, 149, 0, 0.22);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .memo-item.flash {
+    animation: none;
+    background: rgba(255, 149, 0, 0.14);
   }
 }
