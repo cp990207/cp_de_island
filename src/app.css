@@ -58,7 +58,7 @@ button {
   --text-secondary: rgba(30, 30, 30, 0.5);
   --text-tertiary: rgba(30, 30, 30, 0.32);
   --bg-pill: rgba(255, 255, 255, 0.72);
-  --bg-panel: rgba(255, 255, 255, 0.68);
+  --bg-panel: rgba(255, 255, 255, 0.75);
   --border-pill: rgba(255, 255, 255, 0.55);
   --border-panel: rgba(255, 255, 255, 0.5);
   --border-subtle: rgba(0, 0, 0, 0.04);
@@ -367,10 +367,37 @@ button {
   border-radius: 50%;
 }
 
+/* Monochrome sticky note drawn in CSS, like the circle face: shapes in
+   --text-primary instead of a colored emoji. The span itself is the paper
+   (rounded outline); the two pseudo-elements are the text lines. */
 .pill-icon {
-  font-size: 16px;
-  line-height: 1;
+  position: relative;
+  width: 14px;
+  height: 14px;
   flex-shrink: 0;
+  border: 1.6px solid var(--text-primary);
+  border-radius: 3.5px;
+}
+
+/* note lines: the second one shorter, like real handwriting */
+.pill-icon::before,
+.pill-icon::after {
+  content: "";
+  position: absolute;
+  left: 2.6px;
+  height: 1.6px;
+  border-radius: 1px;
+  background: var(--text-primary);
+}
+
+.pill-icon::before {
+  top: 2.8px;
+  width: 6px;
+}
+
+.pill-icon::after {
+  top: 6.4px;
+  width: 4px;
 }
 
 .pill-count {
@@ -378,6 +405,18 @@ button {
   font-weight: 620;
   color: var(--text-primary);
   white-space: nowrap;
+}
+
+.pill-tip {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 540;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: tipSwap 150ms ease;
 }
 
 .pill-sep {
@@ -782,6 +821,17 @@ button {
   }
 }
 
+@keyframes tipSwap {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @keyframes faceBlink {
   0%,
   92%,
@@ -834,6 +884,7 @@ button {
   .circle-clock,
   .circle-face .eye,
   .circle-face .mouth,
+  .pill-tip,
   button {
     animation: none;
     transition: opacity 120ms ease, background 120ms ease;
@@ -926,26 +977,26 @@ button {
   font-weight: 650;
 }
 
-/* Attribute buttons beside the add-input (📅 / ⚑) */
+/* Attribute buttons beside the add-input (due date / priority) */
 
 .attr-btn {
   width: 38px;
   height: 38px;
   border-radius: 12px;
-  background: var(--bg-input);
+  background: rgba(0, 0, 0, 0.06);
   font-size: 14px;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   flex-shrink: 0;
   transition: transform var(--motion-fast) var(--motion-spring),
     background var(--motion-fast) ease, color var(--motion-fast) ease;
 }
 
 .attr-btn:hover {
-  background: rgba(0, 0, 0, 0.07);
-  color: var(--text-secondary);
+  background: rgba(0, 0, 0, 0.1);
+  color: var(--text-primary);
 }
 
 .attr-btn:active {
@@ -955,6 +1006,42 @@ button {
 .attr-btn.active {
   color: var(--accent);
   background: var(--accent-light);
+}
+
+/* Monochrome calendar drawn in CSS, like the pill's sticky-note icon.
+   currentColor picks up the button states: darker on hover, accent when
+   a due date is set. */
+.due-icon {
+  position: relative;
+  width: 15px;
+  height: 13px;
+  border: 1.6px solid currentColor;
+  border-radius: 3px;
+}
+
+/* header separator line, spanning the full border-box width */
+.due-icon::before {
+  content: "";
+  position: absolute;
+  left: -1.6px;
+  right: -1.6px;
+  top: 2.2px;
+  height: 1.6px;
+  background: currentColor;
+}
+
+/* two binding rings above the header — the second one is a box-shadow
+   copy of the first */
+.due-icon::after {
+  content: "";
+  position: absolute;
+  left: 2.2px;
+  top: -3.8px;
+  width: 1.6px;
+  height: 4.6px;
+  border-radius: 1px;
+  background: currentColor;
+  box-shadow: 5.8px 0 0 currentColor;
 }
 
 .attr-btn.p-low {

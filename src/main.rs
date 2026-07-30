@@ -5,6 +5,7 @@ mod storage;
 mod windowing;
 
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
+use dioxus::html::geometry::WheelDelta;
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
 use std::collections::HashSet;
@@ -149,6 +150,11 @@ fn App() -> Element {
     let mut flash = use_signal(HashSet::<String>::new);
     // Set by a Shift+drag so the trailing click does not toggle the panel.
     let mut suppress_click = use_signal(|| false);
+    // Which tip the island pill shows; cycled with the mouse wheel.
+    let mut tip_index = use_signal(|| 0usize);
+    // Wheel delta accumulator (px) so notched wheels and smooth touchpads
+    // both step one tip at a time.
+    let mut wheel_accum = use_signal(|| 0.0f64);
 
     // Persist on every change — but skip the first run: memos were just
     // loaded from disk, so an immediate rewrite is pure risk (e.g. after a
@@ -265,24 +271,8 @@ fn App() -> Element {
     }
 
     let memo_count = memos.read().len();
-    let left_count = memos.read().iter().filter(|m| !m.done).count();
-    let overdue_count = memos.read().iter().filter(|m| m.is_overdue()).count();
-    let nearest_due = memos
-        .read()
-        .iter()
-        .filter(|m| !m.done)
-        .filter_map(|m| m.due)
-        .min();
-
-    let count_text = if memo_count == 0 {
-        "No tasks".to_string()
-    } else if left_count == 0 {
-        "All done".to_string()
-    } else if left_count == 1 {
-        "1 left".to_string()
-    } else {
-        format!("{left_count} left")
-    };
+    // Pill fallback when there is no active task to show.
+    let empty_text = if memo_count == 0 { "No tasks" } else { "All done" };
 
     let chevron_visible = expanded() && memo_count > 0;
 
@@ -316,18 +306,40 @@ fn App() -> Element {
         query.is_empty() || m.content.to_lowercase().contains(query.as_str())
     };
 
+    // Urgency order, shared by the panel list and the island tips.
+    let by_urgency = |a: &memo::Memo, b: &memo::Memo| {
+        due_rank(a.due)
+            .cmp(&due_rank(b.due))
+            .then(priority_rank(a.priority).cmp(&priority_rank(b.priority)))
+            .then(b.updated_at.cmp(&a.updated_at))
+    };
+
     let mut active: Vec<memo::Memo> = memos
         .read()
         .iter()
         .filter(|m| !m.done && matches(m))
         .cloned()
         .collect();
-    active.sort_by(|a, b| {
-        due_rank(a.due)
-            .cmp(&due_rank(b.due))
-            .then(priority_rank(a.priority).cmp(&priority_rank(b.priority)))
-            .then(b.updated_at.cmp(&a.updated_at))
-    });
+    active.sort_by(by_urgency);
+
+    // Island pill tips: every active task in urgency order, ignoring the
+    // search filter — the pill reflects global state. The most urgent task
+    // sits on top, which is what the pill shows by default.
+    let mut tips: Vec<memo::Memo> = memos
+        .read()
+        .iter()
+        .filter(|m| !m.done)
+        .cloned()
+        .collect();
+    tips.sort_by(by_urgency);
+    let tips_len = tips.len();
+    // The modulo guards against the list shrinking (completions/deletes)
+    // while the wheel index points past the new end.
+    let current_tip = if tips_len == 0 {
+        None
+    } else {
+        tips.get(*tip_index.read() % tips_len).cloned()
+    };
 
     let mut completed: Vec<memo::Memo> = memos
         .read()
@@ -501,7 +513,7 @@ fn App() -> Element {
             },
             section {
                 class: "{island_class}",
-                title: "Click to open · Shift+drag to move · Right-click to quit",
+                title: "Click to open · Scroll to switch task · Shift+drag to move · Right-click to quit",
                 // Right-click exits — scoped to the island only, so a stray
                 // right-click inside the panel can never kill the app.
                 oncontextmenu: {
@@ -564,16 +576,60 @@ fn App() -> Element {
                         }
                     }
                 },
+                // The mouse wheel cycles which task the pill shows. Deltas
+                // are accumulated so both notched wheels (~120px/tick) and
+                // smooth touchpads (tiny continuous deltas) step one tip at
+                // a time; wraps around at both ends.
+                onwheel: move |evt| {
+                    if tips_len < 2 {
+                        return;
+                    }
+                    let dy = match evt.delta() {
+                        WheelDelta::Pixels(v) => v.y,
+                        WheelDelta::Lines(v) => v.y * 16.0,
+                        WheelDelta::Pages(v) => v.y * 160.0,
+                    };
+                    let mut accum = *wheel_accum.read() + dy;
+                    // A direction flip drops leftover delta from the other
+                    // direction so it cannot fight the new one.
+                    if accum.signum() != dy.signum() {
+                        accum = dy;
+                    }
+                    const STEP: f64 = 48.0;
+                    let mut idx = *tip_index.read();
+                    while accum >= STEP {
+                        idx = (idx + 1) % tips_len;
+                        accum -= STEP;
+                    }
+                    while accum <= -STEP {
+                        idx = (idx + tips_len - 1) % tips_len;
+                        accum += STEP;
+                    }
+                    tip_index.set(idx);
+                    wheel_accum.set(accum);
+                },
                 div {
                     class: "pill-content",
-                    span { class: "pill-icon", "📝" }
-                    span { class: "pill-count", "{count_text}" }
-                    if overdue_count > 0 {
-                        span { class: "pill-sep", "·" }
-                        span { class: "pill-time pill-overdue", "{overdue_count} overdue" }
-                    } else if let Some(d) = nearest_due {
-                        span { class: "pill-sep", "·" }
-                        span { class: "pill-time", "due {memo::due_label_short(d)}" }
+                    span { class: "pill-icon" }
+                    if let Some(tip) = current_tip {
+                        // Keyed by id: switching tips remounts the node and
+                        // replays the swap animation. Full text on hover —
+                        // the pill is single-line with an ellipsis.
+                        span {
+                            class: "pill-tip",
+                            key: "{tip.id}",
+                            title: "{tip.content}",
+                            "{tip.content}"
+                        }
+                        if let Some(d) = tip.due {
+                            span { class: "pill-sep", "·" }
+                            span {
+                                class: if tip.is_overdue() { "pill-time pill-overdue" } else { "pill-time" },
+                                "due {memo::due_label_short(d)}"
+                            }
+                        }
+                    } else {
+                        span { class: "pill-count", "{empty_text}" }
                     }
                 }
                 div {
@@ -626,7 +682,7 @@ fn App() -> Element {
                             },
                             title: "Set due date",
                             onclick: move |_| show_due_strip.toggle(),
-                            "📅"
+                            span { class: "due-icon" }
                         }
                         PriorityButton { priority: input_priority, with_label: false }
                         button {
