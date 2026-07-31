@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod balance;
 mod memo;
 mod storage;
 mod windowing;
@@ -129,6 +130,7 @@ fn App() -> Element {
     let mut face_expr = use_signal(|| 0u8);
     let mut clock_text = use_signal(local_time_hm);
     let mut hover_gen = use_signal(|| 0u64);
+    let mut is_switching = use_signal(|| false);
     let mut memos = use_signal(storage::load_memos);
     let mut input_text = use_signal(String::new);
     // Attributes staged for the next Add (TickTick-style icons beside the
@@ -155,6 +157,22 @@ fn App() -> Element {
     // Wheel delta accumulator (px) so notched wheels and smooth touchpads
     // both step one tip at a time.
     let mut wheel_accum = use_signal(|| 0.0f64);
+    // Coding side: which provider the pill shows; cycled with the mouse wheel.
+    let mut coding_index = use_signal(|| 0usize);
+    let mut coding_wheel_accum = use_signal(|| 0.0f64);
+    // Which side the cursor is over: 0 = none, 1 = left (tasks), 2 = right (coding).
+    let mut hover_side = use_signal(|| 0u8);
+    // Coding panel open state (mutually exclusive with tasks panel).
+    let mut coding_expanded = use_signal(|| false);
+    // Cached balance data from the last fetch.
+    let mut balance_data = use_signal(
+        || std::collections::HashMap::<String, balance::ProviderResult>::new(),
+    );
+    // Config UI state.
+    let mut config_provider = use_signal(|| String::from("Kimi"));
+    let mut config_key = use_signal(String::new);
+    // Last fetch error message (empty when no error or no fetch attempted).
+    let mut last_fetch_error = use_signal(String::new);
 
     // Persist on every change — but skip the first run: memos were just
     // loaded from disk, so an immediate rewrite is pure risk (e.g. after a
@@ -182,8 +200,9 @@ fn App() -> Element {
                 let mut interactive = true;
                 loop {
                     tokio::time::sleep(Duration::from_millis(30)).await;
-                    let wide = *hovered.peek() || *expanded.peek();
-                    let rects = windowing::hot_rects(&d.window, *expanded.peek(), wide);
+                    let wide = *hovered.peek() || *expanded.peek() || *coding_expanded.peek();
+                    let any_open = *expanded.peek() || *coding_expanded.peek();
+                    let rects = windowing::hot_rects(&d.window, any_open, wide);
                     let want = windowing::cursor_inside(&rects);
                     if want != interactive {
                         interactive = want;
@@ -201,7 +220,7 @@ fn App() -> Element {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             clock_text.set(local_time_hm());
-            if *expanded.peek() || *hovered.peek() {
+            if *expanded.peek() {
                 continue;
             }
             let next_show_time = !*show_time.peek();
@@ -270,26 +289,83 @@ fn App() -> Element {
         });
     }
 
+    // Periodically fetch balance data for all configured providers.
+    use_future(move || async move {
+        let mut last_keys: std::collections::HashMap<String, String> =
+            storage::load_all_provider_keys();
+        let mut last_fetch: Option<std::time::Instant> = None;
+        loop {
+            let keys = storage::load_all_provider_keys();
+            let keys_changed = keys != last_keys;
+            // Fetch when keys changed, or every 5 minutes, or on first run.
+            let should_fetch = !keys.is_empty()
+                && (keys_changed
+                    || last_fetch
+                        .map_or(true, |t| t.elapsed() >= Duration::from_secs(300)));
+            if should_fetch {
+                let results = balance::fetch_all(&keys).await;
+                let mut map = std::collections::HashMap::new();
+                let mut first_err = String::new();
+                for (name, result) in results {
+                    match result {
+                        Ok(data) => {
+                            map.insert(name, data);
+                        }
+                        Err(e) => {
+                            if first_err.is_empty() {
+                                first_err = format!("{name}: {e}");
+                            }
+                        }
+                    }
+                }
+                balance_data.set(map);
+                last_fetch_error.set(first_err);
+                last_keys = keys;
+                last_fetch = Some(std::time::Instant::now());
+            } else {
+                // Keep last_keys in sync even when skipping fetch (e.g. keys empty).
+                last_keys = keys;
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    });
+
     let memo_count = memos.read().len();
     // Pill fallback when there is no active task to show.
     let empty_text = if memo_count == 0 { "No tasks" } else { "All done" };
 
     let chevron_visible = expanded() && memo_count > 0;
 
-    let island_class = if !expanded() && !hovered() {
+    // Island mode: open panel takes priority, then hover, then idle.
+    let is_circle = !expanded() && !coding_expanded() && hover_side() == 0;
+    let is_side_left = expanded() || (!coding_expanded() && hover_side() == 1);
+
+    let island_class = if is_circle {
         if show_time() {
-            "island circle show-time"
+            "island circle show-time".to_string()
         } else {
-            "island circle"
+            "island circle".to_string()
         }
+    } else if is_side_left {
+        let mut c = "island side-left-mode".to_string();
+        if *is_switching.read() {
+            c.push_str(" is-switching");
+        }
+        c
     } else {
-        "island"
+        let mut c = "island side-right-mode".to_string();
+        if *is_switching.read() {
+            c.push_str(" is-switching");
+        }
+        c
     };
 
     let face_class = format!("circle-face face-{}", face_expr());
 
     let stage_class = if expanded() {
         "stage visual-expanded"
+    } else if coding_expanded() {
+        "stage coding-expanded"
     } else {
         "stage"
     };
@@ -389,12 +465,14 @@ fn App() -> Element {
     let collapse_panel = {
         let mut commit = commit_editing.clone();
         move || {
-            if !expanded() {
+            if !expanded() && !coding_expanded() {
                 return;
             }
             commit();
             expanded.set(false);
+            coding_expanded.set(false);
             hovered.set(false);
+            hover_side.set(0);
         }
     };
 
@@ -513,45 +591,10 @@ fn App() -> Element {
             },
             section {
                 class: "{island_class}",
-                title: "Click to open · Scroll to switch task · Shift+drag to move · Right-click to quit",
-                // Right-click exits — scoped to the island only, so a stray
-                // right-click inside the panel can never kill the app.
+                title: "Click to open · Scroll to switch · Shift+drag to move · Right-click to quit",
                 oncontextmenu: {
                     let d = desktop.clone();
                     move |_| d.close()
-                },
-                onmouseenter: move |_| {
-                    *hover_gen.write() += 1;
-                    hovered.set(true);
-                },
-                onmouseleave: move |_| {
-                    if *expanded.peek() {
-                        return;
-                    }
-                    *hover_gen.write() += 1;
-                    let generation = *hover_gen.read();
-                    spawn(async move {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        if *hover_gen.peek() != generation {
-                            return;
-                        }
-                        hovered.set(false);
-                    });
-                },
-                onclick: {
-                    let mut commit = commit_editing.clone();
-                    move |evt: MouseEvent| {
-                        evt.stop_propagation();
-                        // Swallow the click that ends a Shift+drag.
-                        if *suppress_click.peek() {
-                            suppress_click.set(false);
-                            return;
-                        }
-                        if expanded() {
-                            commit();
-                        }
-                        expanded.toggle();
-                    }
                 },
                 onmousedown: {
                     let d = desktop.clone();
@@ -562,13 +605,9 @@ fn App() -> Element {
                         {
                             suppress_click.set(true);
                             d.drag();
-                            // drag() blocks until the move ends — remember
-                            // where the window landed so a restart keeps it.
                             if let Ok(pos) = d.window.outer_position() {
                                 storage::save_window_pos(pos.x, pos.y);
                             }
-                            // drag() blocks until the move ends. If no click
-                            // event follows, clear the flag shortly after.
                             spawn(async move {
                                 tokio::time::sleep(Duration::from_millis(500)).await;
                                 suppress_click.set(false);
@@ -576,71 +615,227 @@ fn App() -> Element {
                         }
                     }
                 },
-                // The mouse wheel cycles which task the pill shows. Deltas
-                // are accumulated so both notched wheels (~120px/tick) and
-                // smooth touchpads (tiny continuous deltas) step one tip at
-                // a time; wraps around at both ends.
-                onwheel: move |evt| {
-                    if tips_len < 2 {
-                        return;
-                    }
-                    let dy = match evt.delta() {
-                        WheelDelta::Pixels(v) => v.y,
-                        WheelDelta::Lines(v) => v.y * 16.0,
-                        WheelDelta::Pages(v) => v.y * 160.0,
-                    };
-                    let mut accum = *wheel_accum.read() + dy;
-                    // A direction flip drops leftover delta from the other
-                    // direction so it cannot fight the new one.
-                    if accum.signum() != dy.signum() {
-                        accum = dy;
-                    }
-                    const STEP: f64 = 48.0;
-                    let mut idx = *tip_index.read();
-                    while accum >= STEP {
-                        idx = (idx + 1) % tips_len;
-                        accum -= STEP;
-                    }
-                    while accum <= -STEP {
-                        idx = (idx + tips_len - 1) % tips_len;
-                        accum += STEP;
-                    }
-                    tip_index.set(idx);
-                    wheel_accum.set(accum);
-                },
                 div {
-                    class: "pill-content",
-                    span { class: "pill-icon" }
-                    if let Some(tip) = current_tip {
-                        // Keyed by id: switching tips remounts the node and
-                        // replays the swap animation. Full text on hover —
-                        // the pill is single-line with an ellipsis.
-                        span {
-                            class: "pill-tip",
-                            key: "{tip.id}",
-                            title: "{tip.content}",
-                            "{tip.content}"
+                    class: if hover_side() == 1 { "side-left hovered" } else { "side-left" },
+                    onmouseenter: move |_| {
+                        let prev = *hover_side.peek();
+                        *hover_gen.write() += 1;
+                        let generation = *hover_gen.read();
+                        spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            if *hover_gen.peek() != generation {
+                                return;
+                            }
+                            is_switching.set(prev != 0 && prev != 1);
+                            hovered.set(true);
+                            hover_side.set(1);
+                        });
+                    },
+                    onmouseleave: move |_| {
+                        if *expanded.peek() || *coding_expanded.peek() {
+                            return;
                         }
-                        if let Some(d) = tip.due {
-                            span { class: "pill-sep", "·" }
+                        *hover_gen.write() += 1;
+                        let generation = *hover_gen.read();
+                        spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            if *hover_gen.peek() != generation {
+                                return;
+                            }
+                            hovered.set(false);
+                            is_switching.set(false);
+                            hover_side.set(0);
+                        });
+                    },
+                    onclick: {
+                        let mut commit = commit_editing.clone();
+                        move |evt: MouseEvent| {
+                            evt.stop_propagation();
+                            if *suppress_click.peek() {
+                                suppress_click.set(false);
+                                return;
+                            }
+                            coding_expanded.set(false);
+                            if expanded() {
+                                commit();
+                            }
+                            expanded.toggle();
+                        }
+                    },
+                    onwheel: move |evt| {
+                        if tips_len < 2 {
+                            return;
+                        }
+                        let dy = match evt.delta() {
+                            WheelDelta::Pixels(v) => v.y,
+                            WheelDelta::Lines(v) => v.y * 16.0,
+                            WheelDelta::Pages(v) => v.y * 160.0,
+                        };
+                        let mut accum = *wheel_accum.read() + dy;
+                        if accum.signum() != dy.signum() {
+                            accum = dy;
+                        }
+                        const STEP: f64 = 48.0;
+                        let mut idx = *tip_index.read();
+                        while accum >= STEP {
+                            idx = (idx + 1) % tips_len;
+                            accum -= STEP;
+                        }
+                        while accum <= -STEP {
+                            idx = (idx + tips_len - 1) % tips_len;
+                            accum += STEP;
+                        }
+                        tip_index.set(idx);
+                        wheel_accum.set(accum);
+                    },
+                    div {
+                        class: "pill-content",
+                        span { class: "pill-icon" }
+                        if let Some(tip) = current_tip {
                             span {
-                                class: if tip.is_overdue() { "pill-time pill-overdue" } else { "pill-time" },
-                                "due {memo::due_label_short(d)}"
+                                class: "pill-tip",
+                                key: "{tip.id}",
+                                title: "{tip.content}",
+                                "{tip.content}"
+                            }
+                            if let Some(d) = tip.due {
+                                span { class: "pill-sep", "·" }
+                                span {
+                                    class: if tip.is_overdue() { "pill-time pill-overdue" } else { "pill-time" },
+                                    "due {memo::due_label_short(d)}"
+                                }
+                            }
+                        } else {
+                            span { class: "pill-count", "{empty_text}" }
+                        }
+                    }
+                    div {
+                        class: "{face_class}",
+                        span { class: "eye left" }
+                        span { class: "eye right" }
+                        span { class: "mouth" }
+                    }
+                    span { class: "circle-clock", "{clock_text.read()}" }
+                    if chevron_visible {
+                        span { class: "pill-chevron", "▾" }
+                    }
+                }
+                div { class: "pill-divider" }
+                div {
+                    class: if hover_side() == 2 { "side-right hovered" } else { "side-right" },
+                    onmouseenter: move |_| {
+                        let prev = *hover_side.peek();
+                        *hover_gen.write() += 1;
+                        let generation = *hover_gen.read();
+                        spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            if *hover_gen.peek() != generation {
+                                return;
+                            }
+                            is_switching.set(prev != 0 && prev != 2);
+                            hovered.set(true);
+                            hover_side.set(2);
+                        });
+                    },
+                    onmouseleave: move |_| {
+                        if *expanded.peek() || *coding_expanded.peek() {
+                            return;
+                        }
+                        *hover_gen.write() += 1;
+                        let generation = *hover_gen.read();
+                        spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            if *hover_gen.peek() != generation {
+                                return;
+                            }
+                            hovered.set(false);
+                            is_switching.set(false);
+                            hover_side.set(0);
+                        });
+                    },
+                    onclick: move |evt: MouseEvent| {
+                        evt.stop_propagation();
+                        if *suppress_click.peek() {
+                            suppress_click.set(false);
+                            return;
+                        }
+                        expanded.set(false);
+                        coding_expanded.toggle();
+                    },
+                    onwheel: move |evt| {
+                        let data = balance_data.read();
+                        let providers: Vec<&String> = data.keys().collect();
+                        let count = providers.len();
+                        if count < 2 {
+                            return;
+                        }
+                        let dy = match evt.delta() {
+                            WheelDelta::Pixels(v) => v.y,
+                            WheelDelta::Lines(v) => v.y * 16.0,
+                            WheelDelta::Pages(v) => v.y * 160.0,
+                        };
+                        let mut accum = *coding_wheel_accum.read() + dy;
+                        if accum.signum() != dy.signum() {
+                            accum = dy;
+                        }
+                        const STEP: f64 = 48.0;
+                        let mut idx = *coding_index.read();
+                        while accum >= STEP {
+                            idx = (idx + 1) % count;
+                            accum -= STEP;
+                        }
+                        while accum <= -STEP {
+                            idx = (idx + count - 1) % count;
+                            accum += STEP;
+                        }
+                        coding_index.set(idx);
+                        coding_wheel_accum.set(accum);
+                    },
+                    div {
+                        class: "coding-content",
+                        span { class: "coding-icon" }
+                        {
+                            let data = balance_data.read();
+                            let providers: Vec<&String> = data.keys().collect();
+                            let idx = *coding_index.read();
+                            if let Some(name) = providers.get(idx.min(providers.len().saturating_sub(1))) {
+                                if let Some(result) = data.get(*name) {
+                                    match result {
+                                        balance::ProviderResult::Balance(b) => {
+                                            rsx! {
+                                                span { class: "coding-provider-label", "{b.provider}" }
+                                                span { class: "coding-amount", "{b.currency} {b.remaining:.2}" }
+                                            }
+                                        }
+                                        balance::ProviderResult::Quota(quotas) => {
+                                            if let Some(q) = quotas.first() {
+                                                rsx! {
+                                                    span { class: "coding-provider-label", "{q.provider}" }
+                                                    span { class: "coding-amount", "{q.remaining}/{q.limit}" }
+                                                }
+                                            } else {
+                                                rsx! { span { class: "coding-amount", "No data" } }
+                                            }
+                                        }
+                                        balance::ProviderResult::Both { balance: b, .. } => {
+                                            rsx! {
+                                                span { class: "coding-provider-label", "{b.provider}" }
+                                                span { class: "coding-amount", "{b.currency} {b.remaining:.2}" }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    rsx! { span { class: "coding-amount", "No keys" } }
+                                }
+                            } else {
+                                rsx! { span { class: "coding-amount", "No keys" } }
                             }
                         }
-                    } else {
-                        span { class: "pill-count", "{empty_text}" }
                     }
-                }
-                div {
-                    class: "{face_class}",
-                    span { class: "eye left" }
-                    span { class: "eye right" }
-                    span { class: "mouth" }
-                }
-                span { class: "circle-clock", "{clock_text.read()}" }
-                if chevron_visible {
-                    span { class: "pill-chevron", "▾" }
+                    div {
+                        class: "coding-circle-icon",
+                        span { class: "coding-icon" }
+                    }
                 }
             }
 
@@ -820,6 +1015,242 @@ fn App() -> Element {
                                 class: "undo-btn",
                                 onclick: move |_| do_undo_delete(),
                                 "Undo"
+                            }
+                        }
+                    }
+                }
+            }
+
+            div {
+                class: "coding-panel-shell",
+                div {
+                    class: "coding-panel",
+                    onclick: move |evt: MouseEvent| evt.stop_propagation(),
+                    {
+                        let data = balance_data.read();
+                        let providers: Vec<&String> = data.keys().collect();
+                        let idx = *coding_index.read();
+                        if providers.is_empty() {
+                            // Distinguish three cases when nothing is shown:
+                            //  1. No key saved at all           -> "No API keys configured"
+                            //  2. Key saved but fetch errored   -> show the error message
+                            //  3. Key saved, fetch in-flight    -> "Fetching balance..."
+                            let saved_keys = storage::load_all_provider_keys();
+                            let err = last_fetch_error.read().clone();
+                            if saved_keys.is_empty() {
+                                rsx! {
+                                    div {
+                                        class: "coding-empty",
+                                        span { class: "coding-empty-icon", "⚡" }
+                                        p { "No API keys configured." }
+                                        p { "Add one below to get started." }
+                                    }
+                                }
+                            } else if !err.is_empty() {
+                                rsx! {
+                                    div {
+                                        class: "coding-empty",
+                                        span { class: "coding-empty-icon", "⚠" }
+                                        p { "Couldn't fetch balance:" }
+                                        p { "{err}" }
+                                        p { "Check the API key is valid and reachable." }
+                                    }
+                                }
+                            } else {
+                                rsx! {
+                                    div {
+                                        class: "coding-empty",
+                                        span { class: "coding-empty-icon", "⏳" }
+                                        p { "Fetching balance..." }
+                                    }
+                                }
+                            }
+                        } else {
+                            let current_name = providers[idx.min(providers.len() - 1)];
+                            let current_data = data.get(current_name);
+                            rsx! {
+                                div {
+                                    class: "provider-summary",
+                                    span { class: "provider-summary-name", "{current_name}" }
+                                    match current_data {
+                                        Some(balance::ProviderResult::Balance(b)) => rsx! {
+                                            span { class: "provider-summary-amount", "{b.currency} {b.remaining:.2}" }
+                                            if let Some(ref bd) = b.breakdown {
+                                                span { class: "provider-summary-detail",
+                                                    "Paid: {b.currency} {bd.paid:.2} · Granted: {b.currency} {bd.granted:.2}"
+                                                }
+                                            }
+                                        },
+                                        Some(balance::ProviderResult::Quota(quotas)) => rsx! {
+                                            if let Some(q) = quotas.first() {
+                                                span { class: "provider-summary-amount", "{q.remaining} / {q.limit}" }
+                                                if let Some(ref reset) = q.reset_at {
+                                                    span { class: "provider-summary-detail", "Resets: {reset}" }
+                                                }
+                                            }
+                                        },
+                                        Some(balance::ProviderResult::Both { balance: b, quotas }) => rsx! {
+                                            span { class: "provider-summary-amount", "{b.currency} {b.remaining:.2}" }
+                                            if !quotas.is_empty() {
+                                                span { class: "provider-summary-detail",
+                                                    "{quotas[0].remaining}/{quotas[0].limit} ({quotas[0].window})"
+                                                }
+                                            }
+                                        },
+                                        None => rsx! { span { class: "provider-summary-amount", "..." } },
+                                    }
+                                }
+                                div {
+                                    class: "provider-list",
+                                    for (i, name) in providers.iter().enumerate() {
+                                        {
+                                            let is_current = i == idx.min(providers.len() - 1);
+                                            let icon_class = match name.as_str() {
+                                                "Kimi" => "provider-card-icon kimi",
+                                                "DeepSeek" => "provider-card-icon deepseek",
+                                                "MiniMax" => "provider-card-icon minimax",
+                                                "GLM" => "provider-card-icon glm",
+                                                _ => "provider-card-icon",
+                                            };
+                                            let result = data.get(*name);
+                                            rsx! {
+                                                div {
+                                                    class: if is_current { "provider-card hovered" } else { "provider-card" },
+                                                    key: "{name}",
+                                                    div { class: "{icon_class}",
+                                                        match name.as_str() {
+                                                            "Kimi" => "K",
+                                                            "DeepSeek" => "DS",
+                                                            "MiniMax" => "MM",
+                                                            "GLM" => "G",
+                                                            _ => "?",
+                                                        }
+                                                    }
+                                                    div {
+                                                        class: "provider-card-info",
+                                                        span { class: "provider-card-name", "{name}" }
+                                                        match result {
+                                                            Some(balance::ProviderResult::Quota(qs)) => rsx! {
+                                                                if let Some(q) = qs.first() {
+                                                                    span { class: "provider-card-detail", "{q.window}: {q.remaining}/{q.limit}" }
+                                                                }
+                                                            },
+                                                            Some(balance::ProviderResult::Balance(b)) => rsx! {
+                                                                if let Some(ref bd) = b.breakdown {
+                                                                    span { class: "provider-card-detail", "P:{bd.paid:.0} G:{bd.granted:.0}" }
+                                                                }
+                                                            },
+                                                            _ => rsx! {},
+                                                        }
+                                                    }
+                                                    span { class: "provider-card-value",
+                                                        match result {
+                                                            Some(balance::ProviderResult::Balance(b)) => format!("{:.2}", b.remaining),
+                                                            Some(balance::ProviderResult::Quota(qs)) => {
+                                                                qs.first().map(|q| format!("{}/{}", q.remaining, q.limit)).unwrap_or_default()
+                                                            }
+                                                            Some(balance::ProviderResult::Both { balance: b, .. }) => format!("{:.2}", b.remaining),
+                                                            None => "...".to_string(),
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div {
+                        class: "config-section",
+                        div {
+                            class: "config-row",
+                            select {
+                                class: "config-select",
+                                value: "{config_provider.read()}",
+                                onchange: move |evt| config_provider.set(evt.value()),
+                                option { value: "Kimi", "Kimi" }
+                                option { value: "DeepSeek", "DeepSeek" }
+                                option { value: "MiniMax", "MiniMax" }
+                                option { value: "GLM", "GLM" }
+                            }
+                            input {
+                                class: "config-input",
+                                r#type: "password",
+                                value: "{config_key.read()}",
+                                placeholder: "API Key...",
+                                oninput: move |evt| config_key.set(evt.value()),
+                                onkeydown: move |evt| {
+                                    if evt.key() == Key::Escape {
+                                        config_key.set(String::new());
+                                        evt.stop_propagation();
+                                    }
+                                },
+                            }
+                        }
+                        div {
+                            class: "config-actions",
+                            button {
+                                class: "config-btn secondary",
+                                onclick: move |_| {
+                                    spawn(async move {
+                                        let keys = storage::load_all_provider_keys();
+                                        if keys.is_empty() {
+                                            return;
+                                        }
+                                        let results = balance::fetch_all(&keys).await;
+                                        let mut map = std::collections::HashMap::new();
+                                        let mut first_err = String::new();
+                                        for (name, result) in results {
+                                            match result {
+                                                Ok(data) => {
+                                                    map.insert(name, data);
+                                                }
+                                                Err(e) => {
+                                                    if first_err.is_empty() {
+                                                        first_err = format!("{name}: {e}");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        balance_data.set(map);
+                                        last_fetch_error.set(first_err);
+                                    });
+                                },
+                                "↻ Refresh"
+                            }
+                            button {
+                                class: "config-btn primary",
+                                onclick: move |_| {
+                                    let provider = config_provider.read().clone();
+                                    let key = config_key.read().trim().to_string();
+                                    if !key.is_empty() {
+                                        storage::save_provider_key(&provider, &key);
+                                        config_key.set(String::new());
+                                        // Fetch immediately so the user sees the new balance.
+                                        spawn(async move {
+                                            let keys = storage::load_all_provider_keys();
+                                            let results = balance::fetch_all(&keys).await;
+                                            let mut map = std::collections::HashMap::new();
+                                            let mut first_err = String::new();
+                                            for (name, result) in results {
+                                                match result {
+                                                    Ok(data) => {
+                                                        map.insert(name, data);
+                                                    }
+                                                    Err(e) => {
+                                                        if first_err.is_empty() {
+                                                            first_err = format!("{name}: {e}");
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            balance_data.set(map);
+                                            last_fetch_error.set(first_err);
+                                        });
+                                    }
+                                },
+                                "Save"
                             }
                         }
                     }

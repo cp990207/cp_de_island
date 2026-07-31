@@ -1,5 +1,6 @@
 use crate::memo::Memo;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 // v2 adds task fields (done/completed_at/priority/due) to Memo. They all
@@ -133,4 +134,56 @@ pub fn save_memos(memos: &[Memo]) {
         eprintln!("[memo-pill] failed to replace {}: {e}", path.display());
         let _ = std::fs::remove_file(&tmp);
     }
+}
+
+fn providers_file() -> PathBuf {
+    data_file().with_file_name("providers.json")
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct ProvidersFile {
+    api_keys: HashMap<String, String>,
+}
+
+pub fn load_provider_key(provider: &str) -> Option<String> {
+    let json = std::fs::read_to_string(providers_file()).ok()?;
+    let f: ProvidersFile = serde_json::from_str(&json).ok()?;
+    f.api_keys.get(provider).cloned()
+}
+
+pub fn save_provider_key(provider: &str, key: &str) {
+    let path = providers_file();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut file = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|j| serde_json::from_str::<ProvidersFile>(&j).ok())
+        .unwrap_or_default();
+    file.api_keys
+        .insert(provider.to_string(), key.to_string());
+    let Ok(json) = serde_json::to_string_pretty(&file) else {
+        return;
+    };
+    let tmp = path.with_extension("tmp");
+    if let Err(e) = std::fs::write(&tmp, &json) {
+        eprintln!("[memo-pill] failed to write {}: {e}", tmp.display());
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        eprintln!("[memo-pill] failed to replace {}: {e}", path.display());
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+pub fn load_all_provider_keys() -> HashMap<String, String> {
+    let json = match std::fs::read_to_string(providers_file()) {
+        Ok(j) => j,
+        Err(_) => return HashMap::new(),
+    };
+    let f: ProvidersFile = match serde_json::from_str(&json) {
+        Ok(f) => f,
+        Err(_) => return HashMap::new(),
+    };
+    f.api_keys
 }
