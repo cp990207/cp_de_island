@@ -20,3 +20,10 @@ cargo build
 ```powershell
 Copy-Item "target\debug\build\webview2-com-sys-*\out\x64\WebView2Loader.dll" -Destination "target\debug\WebView2Loader.dll"
 ```
+
+## 岛（island）动画约定
+
+### 两侧尺寸动画只能用 flex-grow / flex-basis，禁止 flex:1 ↔ width 切换
+`.side-left` / `.side-right` 的宽度变化必须始终通过 `flex-grow` + `flex-basis`（数值↔数值可插值）表达。
+若在 `flex: 1`（flex 驱动）与 `width: 48px`（长度）之间切换，CSS transition 无法插值，会导致左右互切时一侧瞬缩、一侧瞬开。
+折叠侧固定 `flex-grow: 0; flex-basis: 48px`，展开侧 `flex-grow: 1; flex-basis: 0px`；过渡速率统一走 `--motion-grow` + `--spring-gentle`，与圆球↔岛展开一致。

@@ -44,7 +44,6 @@ button {
   -webkit-font-smoothing: antialiased;
   --motion-ease: cubic-bezier(0.2, 0, 0, 1);
   --motion-spring: cubic-bezier(0.16, 1, 0.3, 1);
-  --motion-liquid: cubic-bezier(0.45, 0, 0.2, 1);
   --motion-ui: 300ms;
   --motion-fast: 120ms;
   --motion-grow: 700ms;
@@ -115,6 +114,10 @@ button {
   box-shadow: var(--shadow-pill-hover), var(--glow-top);
 }
 
+/* Side sizing is expressed only through flex-grow/flex-basis — never a
+   flex:1 ↔ width switch — because transitions cannot interpolate between a
+   flex-driven size and a length. This is what lets the shrink/expand below
+   actually animate when the cursor crosses between the two sides. */
 .side-left,
 .side-right {
   height: 48px;
@@ -122,42 +125,30 @@ button {
   display: flex;
   align-items: center;
   overflow: hidden;
+  flex-grow: 0;
+  flex-basis: 48px;
   flex-shrink: 0;
   position: relative;
-  will-change: width;
-  transition: width var(--motion-grow) var(--spring-gentle);
-}
-
-.island.is-switching .side-left,
-.island.is-switching .side-right {
-  transition: width 1000ms var(--motion-liquid);
-}
-
-.island.circle .side-left {
-  width: 48px;
+  transition: flex-grow var(--motion-grow) var(--spring-gentle),
+    flex-basis var(--motion-grow) var(--spring-gentle),
+    padding var(--motion-grow) var(--spring-gentle);
 }
 
 .island.circle .side-right {
-  width: 0;
+  flex-basis: 0px;
   opacity: 0;
   pointer-events: none;
 }
 
 .island.side-left-mode .side-left {
-  flex: 1;
+  flex-grow: 1;
+  flex-basis: 0px;
   padding: 0 18px;
 }
 
-.island.side-left-mode .side-right {
-  width: 48px;
-}
-
-.island.side-right-mode .side-left {
-  width: 48px;
-}
-
 .island.side-right-mode .side-right {
-  flex: 1;
+  flex-grow: 1;
+  flex-basis: 0px;
   padding: 0 18px;
 }
 
@@ -214,24 +205,19 @@ button {
 }
 
 .island.circle .circle-face,
-.island.circle .circle-clock,
-.island.side-right-mode .side-left .circle-face,
-.island.side-right-mode .side-left .circle-clock {
+.island.circle .circle-clock {
   transition: opacity 250ms ease;
 }
 
-.island.circle .circle-face,
-.island.side-right-mode .side-left .circle-face {
+.island.circle .circle-face {
   opacity: 1;
 }
 
-.island.circle.show-time .circle-face,
-.island.side-right-mode .side-left.show-time .circle-face {
+.island.circle.show-time .circle-face {
   opacity: 0;
 }
 
-.island.circle.show-time .circle-clock,
-.island.side-right-mode .side-left.show-time .circle-clock {
+.island.circle.show-time .circle-clock {
   opacity: 1;
 }
 
@@ -491,7 +477,6 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  animation: tipSwap 150ms ease;
 }
 
 .pill-sep {
@@ -516,6 +501,52 @@ button {
   margin-left: 6px;
   transform: rotate(180deg);
   transition: transform var(--motion-fast) var(--motion-ease);
+}
+
+/* Rolling swap (wheel switching): the outgoing line rolls out in the scroll
+   direction while the new line rolls in from the opposite side. Timing
+   follows the shared motion tokens (--motion-ui scale, spring/ease curves). */
+.pill-swap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.side-right .pill-swap {
+  gap: 8px;
+}
+
+.pill-swap-line {
+  display: flex;
+  align-items: center;
+  gap: inherit;
+  flex: 1;
+  min-width: 0;
+}
+
+.pill-swap-line.swap-out {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.pill-swap .swap-in {
+  animation: swapInFromBelow 340ms var(--motion-spring) both;
+}
+
+.pill-swap .swap-out {
+  animation: swapOutToAbove 220ms var(--motion-ease) both;
+}
+
+.pill-swap.roll-down .swap-in {
+  animation-name: swapInFromAbove;
+}
+
+.pill-swap.roll-down .swap-out {
+  animation-name: swapOutToBelow;
 }
 
 .panel-shell {
@@ -896,14 +927,47 @@ button {
   }
 }
 
-@keyframes tipSwap {
+@keyframes swapInFromBelow {
   from {
     opacity: 0;
-    transform: translateY(3px);
+    transform: translateY(6px);
   }
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes swapInFromAbove {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes swapOutToAbove {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes swapOutToBelow {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(6px);
   }
 }
 
@@ -962,8 +1026,7 @@ button {
   .circle-clock,
   .circle-face .eye,
   .circle-face .mouth,
-  .pill-tip,
-  .coding-amount,
+  .pill-swap-line,
   button {
     animation: none;
     transition: opacity 120ms ease, background 120ms ease;
@@ -1325,7 +1388,8 @@ button {
   border-radius: 1px;
 }
 
-.coding-circle-icon {
+.coding-circle-icon,
+.tips-circle-icon {
   position: absolute;
   inset: 0;
   display: flex;
@@ -1342,6 +1406,10 @@ button {
 }
 
 .island.side-left-mode .side-right .coding-circle-icon {
+  opacity: 1;
+}
+
+.island.side-right-mode .side-left .tips-circle-icon {
   opacity: 1;
 }
 
@@ -1364,7 +1432,6 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  animation: tipSwap 150ms ease;
 }
 
 .coding-amount.low {

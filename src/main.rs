@@ -121,6 +121,25 @@ fn priority_rank(p: Option<memo::Priority>) -> u8 {
     }
 }
 
+/// Short balance line for the island pill: (optional provider label, amount).
+/// Shared by the live line and the roll-out overlay of the swap animation.
+fn coding_pill_line(result: &balance::ProviderResult) -> (Option<String>, String) {
+    match result {
+        balance::ProviderResult::Balance(b)
+        | balance::ProviderResult::Both { balance: b, .. } => (
+            Some(b.provider.clone()),
+            format!("{} {:.2}", b.currency, b.remaining),
+        ),
+        balance::ProviderResult::Quota(quotas) => match quotas.first() {
+            Some(q) => (
+                Some(q.provider.clone()),
+                format!("{}/{}", q.remaining, q.limit),
+            ),
+            None => (None, "No data".to_string()),
+        },
+    }
+}
+
 #[component]
 fn App() -> Element {
     let desktop = dioxus::desktop::window();
@@ -130,7 +149,6 @@ fn App() -> Element {
     let mut face_expr = use_signal(|| 0u8);
     let mut clock_text = use_signal(local_time_hm);
     let mut hover_gen = use_signal(|| 0u64);
-    let mut is_switching = use_signal(|| false);
     let mut memos = use_signal(storage::load_memos);
     let mut input_text = use_signal(String::new);
     // Attributes staged for the next Add (TickTick-style icons beside the
@@ -160,6 +178,16 @@ fn App() -> Element {
     // Coding side: which provider the pill shows; cycled with the mouse wheel.
     let mut coding_index = use_signal(|| 0usize);
     let mut coding_wheel_accum = use_signal(|| 0.0f64);
+    // Rolling-swap state for the wheel switch: the previous line keeps
+    // rendering as an overlay that rolls out while the new line rolls in.
+    // `dir`: 1 = wheel down (next, content rolls up), -1 = wheel up.
+    // `gen` guards the delayed overlay cleanup (same pattern as hover_gen).
+    let mut prev_tip_index = use_signal(|| None::<usize>);
+    let mut tip_swap_dir = use_signal(|| 1i8);
+    let mut tip_swap_gen = use_signal(|| 0u64);
+    let mut prev_coding_index = use_signal(|| None::<usize>);
+    let mut coding_swap_dir = use_signal(|| 1i8);
+    let mut coding_swap_gen = use_signal(|| 0u64);
     // Which side the cursor is over: 0 = none, 1 = left (tasks), 2 = right (coding).
     let mut hover_side = use_signal(|| 0u8);
     // Coding panel open state (mutually exclusive with tasks panel).
@@ -347,17 +375,9 @@ fn App() -> Element {
             "island circle".to_string()
         }
     } else if is_side_left {
-        let mut c = "island side-left-mode".to_string();
-        if *is_switching.read() {
-            c.push_str(" is-switching");
-        }
-        c
+        "island side-left-mode".to_string()
     } else {
-        let mut c = "island side-right-mode".to_string();
-        if *is_switching.read() {
-            c.push_str(" is-switching");
-        }
-        c
+        "island side-right-mode".to_string()
     };
 
     let face_class = format!("circle-face face-{}", face_expr());
@@ -416,6 +436,58 @@ fn App() -> Element {
     } else {
         tips.get(*tip_index.read() % tips_len).cloned()
     };
+
+    // Rolling swap: the outgoing line survives one animation cycle as an
+    // overlay. The modulo guards against the list shrinking mid-animation.
+    let prev_tip = prev_tip_index
+        .read()
+        .and_then(|i| tips.get(i % tips_len.max(1)).cloned());
+    let tip_roll = if *tip_swap_dir.read() > 0 {
+        "roll-up"
+    } else {
+        "roll-down"
+    };
+    let tip_out_gen = *tip_swap_gen.read();
+
+    // One pill tip line (content + due chip), shared by the roll-in and
+    // roll-out layers of the swap animation.
+    let tip_spans = |t: &memo::Memo| {
+        rsx! {
+            span { class: "pill-tip", title: "{t.content}", "{t.content}" }
+            if let Some(d) = t.due {
+                span { class: "pill-sep", "·" }
+                span {
+                    class: if t.is_overdue() { "pill-time pill-overdue" } else { "pill-time" },
+                    "due {memo::due_label_short(d)}"
+                }
+            }
+        }
+    };
+
+    // Island coding line as (provider key, optional label, amount), resolved
+    // the same way for the live line and the roll-out overlay.
+    let coding_line_at = |idx: usize| -> (String, Option<String>, String) {
+        let data = balance_data.read();
+        let providers: Vec<&String> = data.keys().collect();
+        match providers.get(idx.min(providers.len().saturating_sub(1))) {
+            Some(name) => {
+                let (label, amount) = data
+                    .get(*name)
+                    .map(coding_pill_line)
+                    .unwrap_or_else(|| (None, "No keys".to_string()));
+                (name.to_string(), label, amount)
+            }
+            None => ("none".to_string(), None, "No keys".to_string()),
+        }
+    };
+    let (coding_key, coding_label, coding_amount) = coding_line_at(*coding_index.read());
+    let prev_coding_line = (*prev_coding_index.read()).map(|i| coding_line_at(i));
+    let coding_roll = if *coding_swap_dir.read() > 0 {
+        "roll-up"
+    } else {
+        "roll-down"
+    };
+    let coding_out_gen = *coding_swap_gen.read();
 
     let mut completed: Vec<memo::Memo> = memos
         .read()
@@ -618,7 +690,6 @@ fn App() -> Element {
                 div {
                     class: if hover_side() == 1 { "side-left hovered" } else { "side-left" },
                     onmouseenter: move |_| {
-                        let prev = *hover_side.peek();
                         *hover_gen.write() += 1;
                         let generation = *hover_gen.read();
                         spawn(async move {
@@ -626,7 +697,6 @@ fn App() -> Element {
                             if *hover_gen.peek() != generation {
                                 return;
                             }
-                            is_switching.set(prev != 0 && prev != 1);
                             hovered.set(true);
                             hover_side.set(1);
                         });
@@ -643,7 +713,6 @@ fn App() -> Element {
                                 return;
                             }
                             hovered.set(false);
-                            is_switching.set(false);
                             hover_side.set(0);
                         });
                     },
@@ -676,7 +745,8 @@ fn App() -> Element {
                             accum = dy;
                         }
                         const STEP: f64 = 48.0;
-                        let mut idx = *tip_index.read();
+                        let old_idx = *tip_index.read();
+                        let mut idx = old_idx;
                         while accum >= STEP {
                             idx = (idx + 1) % tips_len;
                             accum -= STEP;
@@ -685,29 +755,51 @@ fn App() -> Element {
                             idx = (idx + tips_len - 1) % tips_len;
                             accum += STEP;
                         }
-                        tip_index.set(idx);
                         wheel_accum.set(accum);
+                        // A full wrap lands back on the same tip — no swap.
+                        if idx == old_idx {
+                            return;
+                        }
+                        // Keep the outgoing line for one roll cycle; the
+                        // generation guard drops it after the animation.
+                        prev_tip_index.set(Some(old_idx));
+                        tip_swap_dir.set(if dy > 0.0 { 1 } else { -1 });
+                        *tip_swap_gen.write() += 1;
+                        let generation = *tip_swap_gen.read();
+                        tip_index.set(idx);
+                        spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(400)).await;
+                            if *tip_swap_gen.peek() == generation {
+                                prev_tip_index.set(None);
+                            }
+                        });
                     },
                     div {
                         class: "pill-content",
                         span { class: "pill-icon" }
                         if let Some(tip) = current_tip {
-                            span {
-                                class: "pill-tip",
-                                key: "{tip.id}",
-                                title: "{tip.content}",
-                                "{tip.content}"
-                            }
-                            if let Some(d) = tip.due {
-                                span { class: "pill-sep", "·" }
-                                span {
-                                    class: if tip.is_overdue() { "pill-time pill-overdue" } else { "pill-time" },
-                                    "due {memo::due_label_short(d)}"
+                            div {
+                                class: "pill-swap {tip_roll}",
+                                if let Some(prev) = prev_tip {
+                                    div {
+                                        class: "pill-swap-line swap-out",
+                                        key: "out-{tip_out_gen}",
+                                        {tip_spans(&prev)}
+                                    }
+                                }
+                                div {
+                                    class: "pill-swap-line swap-in",
+                                    key: "{tip.id}",
+                                    {tip_spans(&tip)}
                                 }
                             }
                         } else {
                             span { class: "pill-count", "{empty_text}" }
                         }
+                    }
+                    div {
+                        class: "tips-circle-icon",
+                        span { class: "pill-icon" }
                     }
                     div {
                         class: "{face_class}",
@@ -724,7 +816,6 @@ fn App() -> Element {
                 div {
                     class: if hover_side() == 2 { "side-right hovered" } else { "side-right" },
                     onmouseenter: move |_| {
-                        let prev = *hover_side.peek();
                         *hover_gen.write() += 1;
                         let generation = *hover_gen.read();
                         spawn(async move {
@@ -732,7 +823,6 @@ fn App() -> Element {
                             if *hover_gen.peek() != generation {
                                 return;
                             }
-                            is_switching.set(prev != 0 && prev != 2);
                             hovered.set(true);
                             hover_side.set(2);
                         });
@@ -749,7 +839,6 @@ fn App() -> Element {
                                 return;
                             }
                             hovered.set(false);
-                            is_switching.set(false);
                             hover_side.set(0);
                         });
                     },
@@ -779,7 +868,8 @@ fn App() -> Element {
                             accum = dy;
                         }
                         const STEP: f64 = 48.0;
-                        let mut idx = *coding_index.read();
+                        let old_idx = *coding_index.read();
+                        let mut idx = old_idx;
                         while accum >= STEP {
                             idx = (idx + 1) % count;
                             accum -= STEP;
@@ -788,47 +878,46 @@ fn App() -> Element {
                             idx = (idx + count - 1) % count;
                             accum += STEP;
                         }
-                        coding_index.set(idx);
                         coding_wheel_accum.set(accum);
+                        // A full wrap lands back on the same provider — no swap.
+                        if idx == old_idx {
+                            return;
+                        }
+                        // Same rolling swap as the tips side.
+                        prev_coding_index.set(Some(old_idx));
+                        coding_swap_dir.set(if dy > 0.0 { 1 } else { -1 });
+                        *coding_swap_gen.write() += 1;
+                        let generation = *coding_swap_gen.read();
+                        coding_index.set(idx);
+                        spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(400)).await;
+                            if *coding_swap_gen.peek() == generation {
+                                prev_coding_index.set(None);
+                            }
+                        });
                     },
                     div {
                         class: "coding-content",
                         span { class: "coding-icon" }
-                        {
-                            let data = balance_data.read();
-                            let providers: Vec<&String> = data.keys().collect();
-                            let idx = *coding_index.read();
-                            if let Some(name) = providers.get(idx.min(providers.len().saturating_sub(1))) {
-                                if let Some(result) = data.get(*name) {
-                                    match result {
-                                        balance::ProviderResult::Balance(b) => {
-                                            rsx! {
-                                                span { class: "coding-provider-label", "{b.provider}" }
-                                                span { class: "coding-amount", "{b.currency} {b.remaining:.2}" }
-                                            }
-                                        }
-                                        balance::ProviderResult::Quota(quotas) => {
-                                            if let Some(q) = quotas.first() {
-                                                rsx! {
-                                                    span { class: "coding-provider-label", "{q.provider}" }
-                                                    span { class: "coding-amount", "{q.remaining}/{q.limit}" }
-                                                }
-                                            } else {
-                                                rsx! { span { class: "coding-amount", "No data" } }
-                                            }
-                                        }
-                                        balance::ProviderResult::Both { balance: b, .. } => {
-                                            rsx! {
-                                                span { class: "coding-provider-label", "{b.provider}" }
-                                                span { class: "coding-amount", "{b.currency} {b.remaining:.2}" }
-                                            }
-                                        }
+                        div {
+                            class: "pill-swap {coding_roll}",
+                            if let Some((_, prev_label, prev_amount)) = prev_coding_line {
+                                div {
+                                    class: "pill-swap-line swap-out",
+                                    key: "out-{coding_out_gen}",
+                                    if let Some(l) = prev_label {
+                                        span { class: "coding-provider-label", "{l}" }
                                     }
-                                } else {
-                                    rsx! { span { class: "coding-amount", "No keys" } }
+                                    span { class: "coding-amount", "{prev_amount}" }
                                 }
-                            } else {
-                                rsx! { span { class: "coding-amount", "No keys" } }
+                            }
+                            div {
+                                class: "pill-swap-line swap-in",
+                                key: "{coding_key}",
+                                if let Some(l) = coding_label {
+                                    span { class: "coding-provider-label", "{l}" }
+                                }
+                                span { class: "coding-amount", "{coding_amount}" }
                             }
                         }
                     }
