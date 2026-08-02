@@ -130,13 +130,82 @@ fn coding_pill_line(result: &balance::ProviderResult) -> (Option<String>, String
             Some(b.provider.clone()),
             format!("{} {:.2}", b.currency, b.remaining),
         ),
-        balance::ProviderResult::Quota(quotas) => match quotas.first() {
-            Some(q) => (
-                Some(q.provider.clone()),
-                format!("{}/{}", q.remaining, q.limit),
-            ),
-            None => (None, "No data".to_string()),
-        },
+        balance::ProviderResult::Quota(qs) => {
+            if qs.quotas.is_empty() {
+                return (None, "No data".to_string());
+            }
+            // Compact per-window usage: "5h 20% · 7d 55%". The weekly window
+            // is shortened to 7d to match the history toggle labels.
+            let line = qs
+                .quotas
+                .iter()
+                .take(2)
+                .map(|q| {
+                    let w = if q.window == "weekly" {
+                        "7d"
+                    } else {
+                        q.window.as_str()
+                    };
+                    format!("{w} {:.0}%", quota_pct(q))
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            (Some(qs.quotas[0].provider.clone()), line)
+        }
+    }
+}
+
+/// Human label for an ISO reset timestamp: today's times show as "HH:MM",
+/// later dates as "M-D HH:MM". Unparseable values pass through unchanged.
+fn reset_label(iso: &str) -> String {
+    let Ok(t) = time::OffsetDateTime::parse(iso, &time::format_description::well_known::Rfc3339)
+    else {
+        return iso.to_string();
+    };
+    let local = t.to_offset(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC));
+    let today = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+        .date();
+    if local.date() == today {
+        format!("{:02}:{:02}", local.hour(), local.minute())
+    } else {
+        format!(
+            "{}-{} {:02}:{:02}",
+            local.date().month() as u8,
+            local.date().day(),
+            local.hour(),
+            local.minute()
+        )
+    }
+}
+
+/// Compact token counts: 1.2M / 45.3k / 123.
+fn fmt_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1e6)
+    } else if n >= 10_000 {
+        format!("{:.1}k", n as f64 / 1e3)
+    } else if n >= 1_000 {
+        format!("{:.2}k", n as f64 / 1e3)
+    } else {
+        n.to_string()
+    }
+}
+
+fn quota_pct(q: &balance::QuotaInfo) -> f64 {
+    if q.limit == 0 {
+        return 0.0;
+    }
+    (q.used as f64 / q.limit as f64 * 100.0).clamp(0.0, 100.0)
+}
+
+fn bar_class(pct: f64) -> &'static str {
+    if pct >= 95.0 {
+        "provider-bar-fill danger"
+    } else if pct >= 80.0 {
+        "provider-bar-fill warn"
+    } else {
+        "provider-bar-fill"
     }
 }
 
@@ -201,6 +270,12 @@ fn App() -> Element {
     let mut config_key = use_signal(String::new);
     // Last fetch error message (empty when no error or no fetch attempted).
     let mut last_fetch_error = use_signal(String::new);
+    // Kimi quota history (per-cycle peaks) and local token/cost report from
+    // the CLI session logs. Both refresh on the same 5-minute cadence.
+    let mut kimi_history = use_signal(balance::quota_history::load);
+    let mut kimi_cost = use_signal(|| None::<balance::kimi_local::CostReport>);
+    // History chart view: false = 5h cycles, true = weekly cycles.
+    let mut hist_weekly = use_signal(|| false);
 
     // Persist on every change — but skip the first run: memos were just
     // loaded from disk, so an immediate rewrite is pure risk (e.g. after a
@@ -317,11 +392,14 @@ fn App() -> Element {
         });
     }
 
-    // Periodically fetch balance data for all configured providers.
+    // Periodically fetch balance data for all configured providers, sample
+    // Kimi quota history, and refresh the local Kimi token/cost report.
     use_future(move || async move {
         let mut last_keys: std::collections::HashMap<String, String> =
             storage::load_all_provider_keys();
         let mut last_fetch: Option<std::time::Instant> = None;
+        let mut last_scan: Option<std::time::Instant> = None;
+        let mut history = balance::quota_history::load();
         loop {
             let keys = storage::load_all_provider_keys();
             let keys_changed = keys != last_keys;
@@ -334,9 +412,35 @@ fn App() -> Element {
                 let results = balance::fetch_all(&keys).await;
                 let mut map = std::collections::HashMap::new();
                 let mut first_err = String::new();
+                let mut history_dirty = false;
                 for (name, result) in results {
                     match result {
                         Ok(data) => {
+                            // Sample Kimi's 5h/weekly windows into the
+                            // per-cycle history on every successful fetch.
+                            if name == "Kimi" {
+                                if let balance::ProviderResult::Quota(qs) = &data {
+                                    for q in &qs.quotas {
+                                        let series = match q.window.as_str() {
+                                            "weekly" => {
+                                                Some(balance::quota_history::Series::Weekly)
+                                            }
+                                            "5h" => {
+                                                Some(balance::quota_history::Series::Session)
+                                            }
+                                            _ => None,
+                                        };
+                                        if let Some(s) = series {
+                                            history_dirty |= history.record(
+                                                s,
+                                                q.reset_at.as_deref(),
+                                                q.used,
+                                                q.limit,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             map.insert(name, data);
                         }
                         Err(e) => {
@@ -346,6 +450,10 @@ fn App() -> Element {
                         }
                     }
                 }
+                if history_dirty {
+                    balance::quota_history::save(&history);
+                    kimi_history.set(history.clone());
+                }
                 balance_data.set(map);
                 last_fetch_error.set(first_err);
                 last_keys = keys;
@@ -354,6 +462,20 @@ fn App() -> Element {
                 // Keep last_keys in sync even when skipping fetch (e.g. keys empty).
                 last_keys = keys;
             }
+
+            // Local CLI session-log scan for token/cost stats. Needs no API
+            // key, so it runs even when the remote fetch above is skipped.
+            // The scan cache makes repeat runs cheap.
+            let should_scan = last_scan.map_or(true, |t| t.elapsed() >= Duration::from_secs(300));
+            if should_scan {
+                if let Some(dir) = storage::data_dir() {
+                    let records =
+                        balance::kimi_local::load_records(&dir.join("kimi-usage-cache.json"));
+                    kimi_cost.set(Some(balance::kimi_local::build_report(&records)));
+                }
+                last_scan = Some(std::time::Instant::now());
+            }
+
             tokio::time::sleep(Duration::from_secs(30)).await;
         }
     });
@@ -1170,11 +1292,18 @@ fn App() -> Element {
                                                 }
                                             }
                                         },
-                                        Some(balance::ProviderResult::Quota(quotas)) => rsx! {
-                                            if let Some(q) = quotas.first() {
-                                                span { class: "provider-summary-amount", "{q.remaining} / {q.limit}" }
-                                                if let Some(ref reset) = q.reset_at {
-                                                    span { class: "provider-summary-detail", "Resets: {reset}" }
+                                        // Kimi merges plan/quota/reset into the detail block
+                                        // below; its summary stays just the provider name.
+                                        Some(balance::ProviderResult::Quota(qs)) => rsx! {
+                                            if current_name.as_str() != "Kimi" {
+                                                if let Some(ref plan) = qs.plan {
+                                                    span { class: "provider-summary-plan", "{plan}" }
+                                                }
+                                                if let Some(q) = qs.quotas.first() {
+                                                    span { class: "provider-summary-amount", "{q.remaining} / {q.limit}" }
+                                                    if let Some(ref reset) = q.reset_at {
+                                                        span { class: "provider-summary-detail", "Resets {reset_label(reset)}" }
+                                                    }
                                                 }
                                             }
                                         },
@@ -1191,6 +1320,143 @@ fn App() -> Element {
                                 }
                                 div {
                                     class: "provider-list",
+                                    // Kimi usage monitor detail rides at the top of the
+                                    // scrollable list so a fully populated panel can never
+                                    // squeeze the provider cards out of view.
+                                    if current_name == "Kimi" {
+                                    {
+                                        let hist = kimi_history.read();
+                                        let weekly_view = *hist_weekly.read();
+                                        let hist_bars: Vec<f64> = if weekly_view {
+                                            hist.weekly.iter().map(|c| c.pct).collect()
+                                        } else {
+                                            hist.session.iter().map(|c| c.pct).collect()
+                                        };
+                                        let cost = kimi_cost.read().clone();
+                                        let cost_max = cost
+                                            .as_ref()
+                                            .map(|r| {
+                                                r.daily
+                                                    .iter()
+                                                    .map(|(_, d)| d.cost)
+                                                    .fold(0.0f64, f64::max)
+                                                    .max(1e-9)
+                                            })
+                                            .unwrap_or(1e-9);
+                                        rsx! {
+                                            div {
+                                                class: "kimi-detail",
+                                                // Quota windows with progress bars.
+                                                if let Some(balance::ProviderResult::Quota(qs)) = current_data {
+                                                    if let Some(ref plan) = qs.plan {
+                                                        span { class: "provider-summary-plan", "{plan}" }
+                                                    }
+                                                    for q in &qs.quotas {
+                                                        {
+                                                            let pct = quota_pct(q);
+                                                            rsx! {
+                                                                div { class: "kimi-quota-row", key: "{q.window}",
+                                                                    div { class: "kimi-quota-head",
+                                                                        span { class: "kimi-quota-window", "{q.window}" }
+                                                                        span { class: "kimi-quota-nums", "{q.used}/{q.limit} · {pct:.0}%" }
+                                                                        if let Some(ref reset) = q.reset_at {
+                                                                            span { class: "kimi-quota-reset", "↻ {reset_label(reset)}" }
+                                                                        }
+                                                                    }
+                                                                    div { class: "provider-bar",
+                                                                        div { class: bar_class(pct), style: "width: {pct:.0}%;" }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                // Per-cycle usage history (5h / weekly peaks).
+                                                div { class: "kimi-block",
+                                                    div { class: "kimi-block-head",
+                                                        span { class: "kimi-block-title", "Usage history" }
+                                                        div { class: "kimi-toggle",
+                                                            button {
+                                                                class: if weekly_view { "" } else { "on" },
+                                                                onclick: move |_| hist_weekly.set(false),
+                                                                "5h"
+                                                            }
+                                                            button {
+                                                                class: if weekly_view { "on" } else { "" },
+                                                                onclick: move |_| hist_weekly.set(true),
+                                                                "7d"
+                                                            }
+                                                        }
+                                                    }
+                                                    if hist_bars.is_empty() {
+                                                        p { class: "kimi-empty", "No history yet — builds up as quotas are polled." }
+                                                    } else {
+                                                        div { class: "kimi-chart",
+                                                            for pct in hist_bars {
+                                                                div {
+                                                                    class: "kimi-chart-bar",
+                                                                    style: "height: {pct:.0}%;",
+                                                                    title: "{pct:.0}%",
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                // Token usage & equivalent cost from local CLI logs.
+                                                if let Some(report) = cost {
+                                                    div { class: "kimi-block",
+                                                        div { class: "kimi-block-head",
+                                                            span { class: "kimi-block-title", "Token cost (est.)" }
+                                                        }
+                                                        div { class: "kimi-cost-grid",
+                                                            div { class: "kimi-cost-cell",
+                                                                span { class: "kimi-cost-value", "¥{report.today_cost:.2}" }
+                                                                span { class: "kimi-cost-label", "Today" }
+                                                            }
+                                                            div { class: "kimi-cost-cell",
+                                                                span { class: "kimi-cost-value", "¥{report.month_cost:.2}" }
+                                                                span { class: "kimi-cost-label", "30 days" }
+                                                            }
+                                                            div { class: "kimi-cost-cell",
+                                                                span { class: "kimi-cost-value", "{fmt_tokens(report.month_tokens.total())}" }
+                                                                span { class: "kimi-cost-label", "30d tokens" }
+                                                            }
+                                                            div { class: "kimi-cost-cell",
+                                                                if let Some((_, ref model, ref t)) = report.last_request {
+                                                                    span { class: "kimi-cost-value", "{fmt_tokens(t.total())}" }
+                                                                    span { class: "kimi-cost-label", "{model}" }
+                                                                } else {
+                                                                    span { class: "kimi-cost-value", "—" }
+                                                                    span { class: "kimi-cost-label", "Last request" }
+                                                                }
+                                                            }
+                                                        }
+                                                        span { class: "kimi-cost-today",
+                                                            "In {fmt_tokens(report.today_tokens.input)} · Out {fmt_tokens(report.today_tokens.output)} · Cache {fmt_tokens(report.today_tokens.cache_read)} · {report.today_requests} reqs today"
+                                                        }
+                                                        if !report.daily.is_empty() {
+                                                            div { class: "kimi-chart cost",
+                                                                for (day, d) in &report.daily {
+                                                                    {
+                                                                        let h = (d.cost / cost_max * 100.0).round().max(2.0) as u64;
+                                                                        rsx! {
+                                                                            div {
+                                                                                class: "kimi-chart-bar cost",
+                                                                                key: "{day}",
+                                                                                style: "height: {h}%;",
+                                                                                title: "{day}: ¥{d.cost:.2} · {fmt_tokens(d.tokens.total())} tokens",
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                     for (i, name) in providers.iter().enumerate() {
                                         {
                                             let is_current = i == idx.min(providers.len() - 1);
@@ -1220,7 +1486,7 @@ fn App() -> Element {
                                                         span { class: "provider-card-name", "{name}" }
                                                         match result {
                                                             Some(balance::ProviderResult::Quota(qs)) => rsx! {
-                                                                if let Some(q) = qs.first() {
+                                                                if let Some(q) = qs.quotas.first() {
                                                                     span { class: "provider-card-detail", "{q.window}: {q.remaining}/{q.limit}" }
                                                                 }
                                                             },
@@ -1236,7 +1502,7 @@ fn App() -> Element {
                                                         match result {
                                                             Some(balance::ProviderResult::Balance(b)) => format!("{:.2}", b.remaining),
                                                             Some(balance::ProviderResult::Quota(qs)) => {
-                                                                qs.first().map(|q| format!("{}/{}", q.remaining, q.limit)).unwrap_or_default()
+                                                                qs.quotas.first().map(|q| format!("{}/{}", q.remaining, q.limit)).unwrap_or_default()
                                                             }
                                                             Some(balance::ProviderResult::Both { balance: b, .. }) => format!("{:.2}", b.remaining),
                                                             None => "...".to_string(),

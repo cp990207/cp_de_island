@@ -1623,6 +1623,177 @@ button {
   flex-shrink: 0;
 }
 
+.provider-summary-plan {
+  display: inline-block;
+  align-self: flex-start;
+  font-size: 10px;
+  font-weight: 650;
+  color: var(--accent);
+  background: rgba(0, 0, 0, 0.05);
+  padding: 2px 8px;
+  border-radius: 999px;
+  letter-spacing: 0.3px;
+}
+
+.kimi-detail {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 14px;
+  background: var(--bg-item);
+  border: 1px solid var(--border-subtle);
+}
+
+.kimi-quota-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.kimi-quota-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.kimi-quota-window {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-primary);
+  min-width: 44px;
+}
+
+.kimi-quota-nums {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 520;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.kimi-quota-reset {
+  font-size: 10px;
+  font-weight: 520;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.kimi-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kimi-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.kimi-block-title {
+  font-size: 10px;
+  font-weight: 650;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.kimi-toggle {
+  display: flex;
+  gap: 2px;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 999px;
+  padding: 2px;
+}
+
+.kimi-toggle button {
+  border: none;
+  background: transparent;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 2px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.kimi-toggle button.on {
+  background: #fff;
+  color: var(--text-primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.kimi-empty {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin: 2px 0;
+}
+
+.kimi-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 40px;
+  padding-top: 2px;
+}
+
+.kimi-chart-bar {
+  flex: 1;
+  min-width: 3px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
+  opacity: 0.75;
+  transition: height 400ms ease;
+}
+
+.kimi-chart-bar:hover {
+  opacity: 1;
+}
+
+.kimi-chart-bar.cost {
+  background: #0891b2;
+}
+
+.kimi-cost-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.kimi-cost-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.kimi-cost-value {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.kimi-cost-label {
+  font-size: 10px;
+  font-weight: 520;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kimi-cost-today {
+  font-size: 10px;
+  font-weight: 520;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
 .config-section {
   flex-shrink: 0;
   padding-top: 8px;

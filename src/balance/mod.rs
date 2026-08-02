@@ -1,7 +1,9 @@
 pub mod deepseek;
 pub mod glm;
 pub mod kimi;
+pub mod kimi_local;
 pub mod minimax;
+pub mod quota_history;
 
 use serde::{Deserialize, Serialize};
 
@@ -32,10 +34,18 @@ pub struct QuotaInfo {
     pub reset_at: Option<String>,
 }
 
+/// A provider's quota windows plus the subscription plan name when the API
+/// reports one (e.g. Kimi's membership level).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct QuotaSet {
+    pub plan: Option<String>,
+    pub quotas: Vec<QuotaInfo>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ProviderResult {
     Balance(BalanceInfo),
-    Quota(Vec<QuotaInfo>),
+    Quota(QuotaSet),
     Both {
         balance: BalanceInfo,
         quotas: Vec<QuotaInfo>,

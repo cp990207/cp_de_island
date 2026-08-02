@@ -1,4 +1,4 @@
-use super::{Provider, ProviderError, ProviderResult, QuotaInfo};
+use super::{Provider, ProviderError, ProviderResult, QuotaInfo, QuotaSet};
 use serde::Deserialize;
 
 pub struct MiniMaxProvider;
@@ -16,7 +16,7 @@ struct MiniMaxResponse {
     #[serde(default)]
     remains: Option<Vec<MiniMaxRemain>>,
     #[serde(default, rename = "plan")]
-    _plan: Option<MiniMaxPlan>,
+    plan: Option<MiniMaxPlan>,
 }
 
 #[derive(Deserialize)]
@@ -44,7 +44,7 @@ struct MiniMaxRemain {
 #[derive(Deserialize)]
 struct MiniMaxPlan {
     #[serde(default, rename = "planName")]
-    _plan_name: Option<String>,
+    plan_name: Option<String>,
 }
 
 const MINIMAX_URL: &str =
@@ -102,6 +102,9 @@ impl Provider for MiniMaxProvider {
             })
             .collect();
 
-        Ok(ProviderResult::Quota(quotas))
+        Ok(ProviderResult::Quota(QuotaSet {
+            plan: body.plan.and_then(|p| p.plan_name),
+            quotas,
+        }))
     }
 }

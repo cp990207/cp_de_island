@@ -16,17 +16,24 @@ struct MemoFile {
     memos: Vec<Memo>,
 }
 
-fn data_file() -> PathBuf {
+/// The directory all app data files live in (`%APPDATA%/MemoPill`, or a
+/// fallback next to the executable). Never the current working directory —
+/// it changes with the launch context and would scatter data files around.
+pub fn data_dir() -> Option<PathBuf> {
     if let Ok(base) = std::env::var("APPDATA") {
-        return PathBuf::from(base).join("MemoPill").join("memos.json");
+        return Some(PathBuf::from(base).join("MemoPill"));
     }
-    // Fallback: next to the executable. Never the current working directory —
-    // it changes with the launch context and would scatter data files around.
     let dir = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."));
-    dir.join("MemoPill").join("memos.json")
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))?;
+    Some(dir.join("MemoPill"))
+}
+
+fn data_file() -> PathBuf {
+    if let Some(dir) = data_dir() {
+        return dir.join("memos.json");
+    }
+    PathBuf::from("MemoPill").join("memos.json")
 }
 
 /// Window placement, kept in a separate settings file so the memos rewrite
