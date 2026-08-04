@@ -322,6 +322,48 @@ pub struct CostReport {
     pub daily: Vec<(String, DailyStat)>,
 }
 
+/// Unified read-only view over the two cost-report structs
+/// (`kimi_local::CostReport` and `zcode_local::ZcodeCostReport`) so a single
+/// rendering function can drive the detail block for any provider. The two
+/// structs share their first seven fields verbatim; `by_source` defaults to
+/// an empty slice for Kimi (which has no such dimension).
+pub trait CostData {
+    fn today_cost(&self) -> f64;
+    fn month_cost(&self) -> f64;
+    fn today_tokens(&self) -> &TokenCount;
+    fn month_tokens(&self) -> &TokenCount;
+    fn today_requests(&self) -> u64;
+    fn last_request(&self) -> Option<&(i64, String, TokenCount)>;
+    fn daily(&self) -> &[(String, DailyStat)];
+    fn by_source(&self) -> &[super::zcode_local::DimensionStat] {
+        &[]
+    }
+}
+
+impl CostData for CostReport {
+    fn today_cost(&self) -> f64 {
+        self.today_cost
+    }
+    fn month_cost(&self) -> f64 {
+        self.month_cost
+    }
+    fn today_tokens(&self) -> &TokenCount {
+        &self.today_tokens
+    }
+    fn month_tokens(&self) -> &TokenCount {
+        &self.month_tokens
+    }
+    fn today_requests(&self) -> u64 {
+        self.today_requests
+    }
+    fn last_request(&self) -> Option<&(i64, String, TokenCount)> {
+        self.last_request.as_ref()
+    }
+    fn daily(&self) -> &[(String, DailyStat)] {
+        &self.daily
+    }
+}
+
 pub fn build_report(records: &[UsageRecord]) -> CostReport {
     let mut report = CostReport::default();
     let today = today_string();

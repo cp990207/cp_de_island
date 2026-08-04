@@ -17,6 +17,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 time = { version = "0.3", features = ["local-offset", "parsing", "formatting"] }
 reqwest = { version = "0.12", features = ["json"] }
+# bundled = statically compiles SQLite C source into the binary, so the app
+# stays a single exe with zero external DLL requirements.
+rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["time"] }
 uuid = { version = "1", features = ["v4"] }
 

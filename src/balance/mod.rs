@@ -4,6 +4,7 @@ pub mod kimi;
 pub mod kimi_local;
 pub mod minimax;
 pub mod quota_history;
+pub mod zcode_local;
 
 use serde::{Deserialize, Serialize};
 
@@ -84,15 +85,28 @@ pub fn all_providers() -> Vec<Box<dyn Provider>> {
     ]
 }
 
+/// One monitor instance to fetch: `id` is the stable instance id (e.g.
+/// "glm-mon-2"), `provider` is the type name used to look up the Provider
+/// impl, `key` is the API key for this instance.
+pub struct MonitorKey {
+    pub id: String,
+    pub provider: String,
+    pub key: String,
+}
+
+/// Fetch each monitor instance independently. The same provider type may
+/// appear more than once (multiple accounts) — each is fetched on its own.
+/// Returns `(id, provider_type_name, result)` tuples keyed by instance id.
 pub async fn fetch_all(
-    keys: &std::collections::HashMap<String, String>,
-) -> Vec<(String, Result<ProviderResult, ProviderError>)> {
+    monitors: &[MonitorKey],
+) -> Vec<(String, String, Result<ProviderResult, ProviderError>)> {
     let providers = all_providers();
     let mut results = Vec::new();
-    for p in &providers {
-        let name = p.name().to_string();
-        if let Some(key) = keys.get(&name) {
-            results.push((name, p.fetch(key).await));
+    for m in monitors {
+        // Find the Provider impl whose name matches this instance's type.
+        if let Some(p) = providers.iter().find(|p| p.name() == m.provider) {
+            let result = p.fetch(&m.key).await;
+            results.push((m.id.clone(), m.provider.clone(), result));
         }
     }
     results

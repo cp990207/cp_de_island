@@ -67,12 +67,20 @@ impl QuotaHistory {
     }
 }
 
-fn history_path() -> Option<std::path::PathBuf> {
-    Some(crate::storage::data_dir()?.join("kimi-quota-history.json"))
+/// Path for a named history file inside the app data dir. Shared by Kimi
+/// (kimi-quota-history.json) and GLM (glm-quota-history.json) so each
+/// provider keeps its own per-cycle series.
+fn named_path(filename: &str) -> Option<std::path::PathBuf> {
+    Some(crate::storage::data_dir()?.join(filename))
 }
 
 pub fn load() -> QuotaHistory {
-    let Some(path) = history_path() else {
+    load_named("kimi-quota-history.json")
+}
+
+/// Load a named history file (e.g. "glm-quota-history.json").
+pub fn load_named(filename: &str) -> QuotaHistory {
+    let Some(path) = named_path(filename) else {
         return QuotaHistory::default();
     };
     std::fs::read_to_string(path)
@@ -82,7 +90,12 @@ pub fn load() -> QuotaHistory {
 }
 
 pub fn save(history: &QuotaHistory) {
-    let Some(path) = history_path() else {
+    save_named("kimi-quota-history.json", history);
+}
+
+/// Save a named history file (e.g. "glm-quota-history.json").
+pub fn save_named(filename: &str, history: &QuotaHistory) {
+    let Some(path) = named_path(filename) else {
         return;
     };
     if let Some(dir) = path.parent() {

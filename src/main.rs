@@ -209,6 +209,59 @@ fn bar_class(pct: f64) -> &'static str {
     }
 }
 
+/// Re-fetch every saved monitor instance and write the results into the
+/// balance data/error/meta signals. Centralised so Add / Remove / Re-fetch
+/// all share one source of truth. `Signal<T>` is `Copy`, so callers just pass
+/// their signals through. Runs the fetch then updates `balance_data` (id →
+/// result), `balance_errors` (id → msg), `balance_meta` (id → provider type),
+/// and `last_fetch_error` (first failure's message).
+async fn refresh_balance(
+    mut balance_data: Signal<std::collections::HashMap<String, balance::ProviderResult>>,
+    mut balance_errors: Signal<std::collections::HashMap<String, String>>,
+    mut balance_meta: Signal<std::collections::HashMap<String, String>>,
+    mut last_fetch_error: Signal<String>,
+) {
+    let monitors = storage::load_monitors();
+    if monitors.is_empty() {
+        balance_data.set(std::collections::HashMap::new());
+        balance_errors.set(std::collections::HashMap::new());
+        balance_meta.set(std::collections::HashMap::new());
+        last_fetch_error.set(String::new());
+        return;
+    }
+    let keys: Vec<balance::MonitorKey> = monitors
+        .iter()
+        .map(|m| balance::MonitorKey {
+            id: m.id.clone(),
+            provider: m.provider.clone(),
+            key: m.key.clone(),
+        })
+        .collect();
+    let results = balance::fetch_all(&keys).await;
+    let mut map = std::collections::HashMap::new();
+    let mut errs = std::collections::HashMap::new();
+    let mut meta = std::collections::HashMap::new();
+    let mut first_err = String::new();
+    for (id, provider, result) in results {
+        meta.insert(id.clone(), provider.clone());
+        match result {
+            Ok(d) => {
+                map.insert(id, d);
+            }
+            Err(e) => {
+                if first_err.is_empty() {
+                    first_err = format!("{provider}: {e}");
+                }
+                errs.insert(id, e.to_string());
+            }
+        }
+    }
+    balance_data.set(map);
+    balance_errors.set(errs);
+    balance_meta.set(meta);
+    last_fetch_error.set(first_err);
+}
+
 #[component]
 fn App() -> Element {
     let desktop = dioxus::desktop::window();
@@ -244,9 +297,18 @@ fn App() -> Element {
     // Wheel delta accumulator (px) so notched wheels and smooth touchpads
     // both step one tip at a time.
     let mut wheel_accum = use_signal(|| 0.0f64);
-    // Coding side: which provider the pill shows; cycled with the mouse wheel.
-    let mut coding_index = use_signal(|| 0usize);
-    let mut coding_wheel_accum = use_signal(|| 0.0f64);
+    // Coding side: per-provider card expand state. Each provider card can be
+    // expanded independently (multiple open at once); collapsed cards show a
+    // compact 5h/weekly summary, expanded cards show the full detail block.
+    let mut coding_card_expanded =
+        use_signal(|| std::collections::HashSet::<String>::new());
+    // Always-on "Add monitor" row at the bottom of the provider list: a
+    // one-line form (provider select + key input + Add button) so there's
+    // always a visible entry point. Provider/key draft live here; the card
+    // list only renders instances already saved, so without this row there'd
+    // be no way to add the very first (or next, or duplicate) provider.
+    let add_monitor_provider = use_signal(|| String::from("Kimi"));
+    let add_monitor_key = use_signal(String::new);
     // Rolling-swap state for the wheel switch: the previous line keeps
     // rendering as an overlay that rolls out while the new line rolls in.
     // `dir`: 1 = wheel down (next, content rolls up), -1 = wheel up.
@@ -254,26 +316,27 @@ fn App() -> Element {
     let mut prev_tip_index = use_signal(|| None::<usize>);
     let mut tip_swap_dir = use_signal(|| 1i8);
     let mut tip_swap_gen = use_signal(|| 0u64);
-    let mut prev_coding_index = use_signal(|| None::<usize>);
-    let mut coding_swap_dir = use_signal(|| 1i8);
-    let mut coding_swap_gen = use_signal(|| 0u64);
     // Which side the cursor is over: 0 = none, 1 = left (tasks), 2 = right (coding).
     let mut hover_side = use_signal(|| 0u8);
     // Coding panel open state (mutually exclusive with tasks panel).
     let mut coding_expanded = use_signal(|| false);
-    // Cached balance data from the last fetch.
+    // Cached balance data from the last fetch. Keyed by monitor instance id
+    // (e.g. "glm-mon-2"), NOT by provider name — that allows multiple
+    // instances of the same provider type to coexist as separate cards.
     let mut balance_data = use_signal(
         || std::collections::HashMap::<String, balance::ProviderResult>::new(),
     );
-    // Per-provider fetch errors. balance_data only holds successes, so this
-    // map carries the failures — that way a single failed provider (e.g.
-    // GLM) still shows up as a card with its error instead of vanishing
-    // silently when another provider (e.g. Kimi) succeeds.
+    // Per-instance fetch errors. balance_data only holds successes, so this
+    // map carries the failures — that way a single failed instance still
+    // shows up as a card with its error instead of vanishing silently when
+    // another instance succeeds.
     let mut balance_errors =
         use_signal(|| std::collections::HashMap::<String, String>::new());
-    // Config UI state.
-    let mut config_provider = use_signal(|| String::from("Kimi"));
-    let mut config_key = use_signal(String::new);
+    // Instance id -> provider type name (e.g. "glm-mon-2" -> "GLM"). The card
+    // renderer needs the type to pick icons / cost views / history series,
+    // but the data maps are keyed by id, so this side table bridges them.
+    let mut balance_meta =
+        use_signal(|| std::collections::HashMap::<String, String>::new());
     // Last fetch error message (empty when no error or no fetch attempted).
     let mut last_fetch_error = use_signal(String::new);
     // Bumped whenever a provider key is saved or removed, so the
@@ -283,6 +346,10 @@ fn App() -> Element {
     // the CLI session logs. Both refresh on the same 5-minute cadence.
     let mut kimi_history = use_signal(balance::quota_history::load);
     let mut kimi_cost = use_signal(|| None::<balance::kimi_local::CostReport>);
+    // GLM counterpart: per-cycle history (own file) + ZCode-local token/cost
+    // report mined from ~/.zcode/cli/db/db.sqlite.
+    let mut glm_history = use_signal(|| balance::quota_history::load_named("glm-quota-history.json"));
+    let mut zcode_cost = use_signal(|| None::<balance::zcode_local::ZcodeCostReport>);
     // History chart view: false = 5h cycles, true = weekly cycles.
     let mut hist_weekly = use_signal(|| false);
 
@@ -404,44 +471,66 @@ fn App() -> Element {
     // Periodically fetch balance data for all configured providers, sample
     // Kimi quota history, and refresh the local Kimi token/cost report.
     use_future(move || async move {
-        let mut last_keys: std::collections::HashMap<String, String> =
-            storage::load_all_provider_keys();
+        let mut last_monitors: Vec<storage::MonitorEntry> = storage::load_monitors();
         let mut last_fetch: Option<std::time::Instant> = None;
         let mut last_scan: Option<std::time::Instant> = None;
         let mut history = balance::quota_history::load();
+        let mut glm_hist = balance::quota_history::load_named("glm-quota-history.json");
         loop {
-            let keys = storage::load_all_provider_keys();
-            let keys_changed = keys != last_keys;
-            // Fetch when keys changed, or every 5 minutes, or on first run.
-            let should_fetch = !keys.is_empty()
-                && (keys_changed
+            let monitors = storage::load_monitors();
+            let monitors_changed = monitors != last_monitors;
+            // Fetch when monitors changed, or every 5 minutes, or on first run.
+            let should_fetch = !monitors.is_empty()
+                && (monitors_changed
                     || last_fetch
                         .map_or(true, |t| t.elapsed() >= Duration::from_secs(300)));
             if should_fetch {
+                let keys: Vec<balance::MonitorKey> = monitors
+                    .iter()
+                    .map(|m| balance::MonitorKey {
+                        id: m.id.clone(),
+                        provider: m.provider.clone(),
+                        key: m.key.clone(),
+                    })
+                    .collect();
                 let results = balance::fetch_all(&keys).await;
                 let mut map = std::collections::HashMap::new();
                 let mut errs = std::collections::HashMap::new();
+                let mut meta = std::collections::HashMap::new();
                 let mut first_err = String::new();
                 let mut history_dirty = false;
-                for (name, result) in results {
+                let mut glm_history_dirty = false;
+                for (id, provider, result) in results {
+                    // Always record the instance -> type mapping so the card
+                    // renderer can pick icons/cost views even on fetch error.
+                    meta.insert(id.clone(), provider.clone());
                     match result {
                         Ok(data) => {
-                            // Sample Kimi's 5h/weekly windows into the
-                            // per-cycle history on every successful fetch.
-                            if name == "Kimi" {
-                                if let balance::ProviderResult::Quota(qs) = &data {
-                                    for q in &qs.quotas {
-                                        let series = match q.window.as_str() {
-                                            "weekly" => {
-                                                Some(balance::quota_history::Series::Weekly)
-                                            }
-                                            "5h" => {
-                                                Some(balance::quota_history::Series::Session)
-                                            }
-                                            _ => None,
-                                        };
-                                        if let Some(s) = series {
+                            // Sample 5h/weekly windows into the per-cycle
+                            // history on every successful fetch. History is
+                            // sampled per provider TYPE (not per instance):
+                            // Kimi type -> kimi_history, GLM type -> glm_history.
+                            if let balance::ProviderResult::Quota(qs) = &data {
+                                for q in &qs.quotas {
+                                    let series = match q.window.as_str() {
+                                        "weekly" => {
+                                            Some(balance::quota_history::Series::Weekly)
+                                        }
+                                        "5h" => {
+                                            Some(balance::quota_history::Series::Session)
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(s) = series {
+                                        if provider == "Kimi" {
                                             history_dirty |= history.record(
+                                                s,
+                                                q.reset_at.as_deref(),
+                                                q.used,
+                                                q.limit,
+                                            );
+                                        } else if provider == "GLM" {
+                                            glm_history_dirty |= glm_hist.record(
                                                 s,
                                                 q.reset_at.as_deref(),
                                                 q.used,
@@ -451,14 +540,14 @@ fn App() -> Element {
                                     }
                                 }
                             }
-                            map.insert(name, data);
+                            map.insert(id, data);
                         }
                         Err(e) => {
-                            let msg = format!("{name}: {e}");
+                            let msg = format!("{provider}: {e}");
                             if first_err.is_empty() {
                                 first_err = msg.clone();
                             }
-                            errs.insert(name, e.to_string());
+                            errs.insert(id, e.to_string());
                         }
                     }
                 }
@@ -466,14 +555,19 @@ fn App() -> Element {
                     balance::quota_history::save(&history);
                     kimi_history.set(history.clone());
                 }
+                if glm_history_dirty {
+                    balance::quota_history::save_named("glm-quota-history.json", &glm_hist);
+                    glm_history.set(glm_hist.clone());
+                }
                 balance_data.set(map);
                 balance_errors.set(errs);
+                balance_meta.set(meta);
                 last_fetch_error.set(first_err);
-                last_keys = keys;
+                last_monitors = monitors;
                 last_fetch = Some(std::time::Instant::now());
             } else {
-                // Keep last_keys in sync even when skipping fetch (e.g. keys empty).
-                last_keys = keys;
+                // Keep last_monitors in sync even when skipping fetch.
+                last_monitors = monitors;
             }
 
             // Local CLI session-log scan for token/cost stats. Needs no API
@@ -486,6 +580,9 @@ fn App() -> Element {
                         balance::kimi_local::load_records(&dir.join("kimi-usage-cache.json"));
                     kimi_cost.set(Some(balance::kimi_local::build_report(&records)));
                 }
+                // ZCode local usage from its SQLite db. Independent of Kimi:
+                // ZCode not being installed is fine, build_report returns empty.
+                zcode_cost.set(Some(balance::zcode_local::build_report()));
                 last_scan = Some(std::time::Instant::now());
             }
 
@@ -599,38 +696,40 @@ fn App() -> Element {
         }
     };
 
-    // Island coding line as (provider key, optional label, amount), resolved
-    // the same way for the live line and the roll-out overlay.
-    let coding_line_at = |idx: usize| -> (String, Option<String>, String) {
+    // Island coding pill: show the first provider that has data as a compact
+    // summary line (no carousel — each provider has its own expandable card in
+    // the panel now). Falls back to the first provider name with no amount.
+    let coding_pill_summary = {
         let data = balance_data.read();
         let errs = balance_errors.read();
-        // Provider list = successes ∪ failures, so a fetch that errored (e.g.
-        // GLM) still has a card to show instead of vanishing.
-        let mut names: Vec<&String> = data.keys().collect();
+        let meta = balance_meta.read();
+        // Instance ids with either data or an error.
+        let mut ids: Vec<&String> = data.keys().collect();
         for k in errs.keys() {
-            if !names.contains(&k) {
-                names.push(k);
+            if !ids.contains(&k) {
+                ids.push(k);
             }
         }
-        match names.get(idx.min(names.len().saturating_sub(1))) {
-            Some(name) => {
-                let (label, amount) = data
-                    .get(*name)
-                    .map(coding_pill_line)
-                    .unwrap_or_else(|| (None, "Error".to_string()));
-                (name.to_string(), label, amount)
+        // Prefer the first instance that actually has balance data. The pill
+        // shows the provider TYPE name (e.g. "GLM"), resolved via balance_meta.
+        let with_data = ids.iter().find_map(|id| {
+            data.get(*id).map(|r| {
+                let label = meta.get(*id).cloned().unwrap_or_else(|| (*id).to_string());
+                (label, coding_pill_line(r).1)
+            })
+        });
+        match with_data {
+            Some((name, amount)) => (Some(name), Some(amount)),
+            None => match ids.first() {
+                Some(id) => {
+                    let label = meta.get(*id).cloned().unwrap_or_else(|| (*id).to_string());
+                    (label.into(), None)
+                }
+                None => (None, None),
             }
-            None => ("none".to_string(), None, "No keys".to_string()),
         }
     };
-    let (coding_key, coding_label, coding_amount) = coding_line_at(*coding_index.read());
-    let prev_coding_line = (*prev_coding_index.read()).map(|i| coding_line_at(i));
-    let coding_roll = if *coding_swap_dir.read() > 0 {
-        "roll-up"
-    } else {
-        "roll-down"
-    };
-    let coding_out_gen = *coding_swap_gen.read();
+
 
     let mut completed: Vec<memo::Memo> = memos
         .read()
@@ -994,79 +1093,19 @@ fn App() -> Element {
                         expanded.set(false);
                         coding_expanded.toggle();
                     },
-                    onwheel: move |evt| {
-                        let data = balance_data.read();
-                        let errs = balance_errors.read();
-                        let mut providers: Vec<&String> = data.keys().collect();
-                        for k in errs.keys() {
-                            if !providers.contains(&k) {
-                                providers.push(k);
-                            }
-                        }
-                        let count = providers.len();
-                        if count < 2 {
-                            return;
-                        }
-                        let dy = match evt.delta() {
-                            WheelDelta::Pixels(v) => v.y,
-                            WheelDelta::Lines(v) => v.y * 16.0,
-                            WheelDelta::Pages(v) => v.y * 160.0,
-                        };
-                        let mut accum = *coding_wheel_accum.read() + dy;
-                        if accum.signum() != dy.signum() {
-                            accum = dy;
-                        }
-                        const STEP: f64 = 48.0;
-                        let old_idx = *coding_index.read();
-                        let mut idx = old_idx;
-                        while accum >= STEP {
-                            idx = (idx + 1) % count;
-                            accum -= STEP;
-                        }
-                        while accum <= -STEP {
-                            idx = (idx + count - 1) % count;
-                            accum += STEP;
-                        }
-                        coding_wheel_accum.set(accum);
-                        // A full wrap lands back on the same provider — no swap.
-                        if idx == old_idx {
-                            return;
-                        }
-                        // Same rolling swap as the tips side.
-                        prev_coding_index.set(Some(old_idx));
-                        coding_swap_dir.set(if dy > 0.0 { 1 } else { -1 });
-                        *coding_swap_gen.write() += 1;
-                        let generation = *coding_swap_gen.read();
-                        coding_index.set(idx);
-                        spawn(async move {
-                            tokio::time::sleep(Duration::from_millis(400)).await;
-                            if *coding_swap_gen.peek() == generation {
-                                prev_coding_index.set(None);
-                            }
-                        });
-                    },
                     div {
                         class: "coding-content",
                         span { class: "coding-icon" }
                         div {
-                            class: "pill-swap {coding_roll}",
-                            if let Some((_, prev_label, prev_amount)) = prev_coding_line {
-                                div {
-                                    class: "pill-swap-line swap-out",
-                                    key: "out-{coding_out_gen}",
-                                    if let Some(l) = prev_label {
-                                        span { class: "coding-provider-label", "{l}" }
-                                    }
-                                    span { class: "coding-amount", "{prev_amount}" }
-                                }
-                            }
+                            class: "pill-swap",
                             div {
                                 class: "pill-swap-line swap-in",
-                                key: "{coding_key}",
-                                if let Some(l) = coding_label {
-                                    span { class: "coding-provider-label", "{l}" }
+                                if let Some(label) = coding_pill_summary.0 {
+                                    span { class: "coding-provider-label", "{label}" }
                                 }
-                                span { class: "coding-amount", "{coding_amount}" }
+                                if let Some(amount) = coding_pill_summary.1 {
+                                    span { class: "coding-amount", "{amount}" }
+                                }
                             }
                         }
                     }
@@ -1267,29 +1306,39 @@ fn App() -> Element {
                     {
                         let data = balance_data.read();
                         let errs = balance_errors.read();
-                        // Provider list = successes ∪ failures, so a fetch that
-                        // errored (e.g. GLM) still has a card to show.
-                        let mut providers: Vec<&String> = data.keys().collect();
+                        let meta = balance_meta.read();
+                        // Instance list = successes ∪ failures, so a fetch that
+                        // errored still has a card to show. Keys here are monitor
+                        // instance ids (e.g. "glm-mon-2"), not provider names.
+                        let mut ids: Vec<&String> = data.keys().collect();
                         for k in errs.keys() {
-                            if !providers.contains(&k) {
-                                providers.push(k);
+                            if !ids.contains(&k) {
+                                ids.push(k);
                             }
                         }
-                        let idx = *coding_index.read();
-                        if providers.is_empty() {
+                        if ids.is_empty() {
                             // Distinguish three cases when nothing is shown:
-                            //  1. No key saved at all           -> "No API keys configured"
-                            //  2. Key saved but fetch errored   -> show the error message
-                            //  3. Key saved, fetch in-flight    -> "Fetching balance..."
-                            let saved_keys = storage::load_all_provider_keys();
+                            //  1. No monitor saved at all        -> "No API keys configured"
+                            //  2. Monitor saved but fetch errored -> show the error message
+                            //  3. Monitor saved, fetch in-flight  -> "Fetching balance..."
+                            let monitors = storage::load_monitors();
                             let err = last_fetch_error.read().clone();
-                            if saved_keys.is_empty() {
+                            if monitors.is_empty() {
                                 rsx! {
                                     div {
                                         class: "coding-empty",
                                         span { class: "coding-empty-icon", "⚡" }
                                         p { "No API keys configured." }
                                         p { "Add one below to get started." }
+                                        AddMonitorRow {
+                                            add_monitor_provider,
+                                            add_monitor_key,
+                                            saved_keys_version,
+                                            balance_data,
+                                            balance_errors,
+                                            balance_meta,
+                                            last_fetch_error,
+                                        }
                                     }
                                 }
                             } else if !err.is_empty() {
@@ -1312,182 +1361,329 @@ fn App() -> Element {
                                 }
                             }
                         } else {
-                            let current_name = providers[idx.min(providers.len() - 1)];
-                            let current_data = data.get(current_name);
-                            let current_err = errs.get(current_name).cloned();
+                            // Stable display order: by provider type (Kimi/GLM/
+                            // DeepSeek/MiniMax), then by instance id so duplicate
+                            // providers stay grouped and stable. Each instance is
+                            // its own collapsible card (multiple open at once).
+                            let meta_for_sort = meta.clone();
+                            let mut sorted: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+                            sorted.sort_by(|a, b| {
+                                let rank = |id: &str| -> i32 {
+                                    match meta_for_sort.get(id).map(|s| s.as_str()) {
+                                        Some("Kimi") => 0,
+                                        Some("GLM") => 1,
+                                        Some("DeepSeek") => 2,
+                                        Some("MiniMax") => 3,
+                                        _ => 99,
+                                    }
+                                };
+                                rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
+                            });
+                            let expanded_set = coding_card_expanded.read();
+                            let _v = *saved_keys_version.read();
+                            let monitors = storage::load_monitors();
                             rsx! {
                                 div {
-                                    class: "provider-summary",
-                                    span { class: "provider-summary-name", "{current_name}" }
-                                    match current_data {
-                                        Some(balance::ProviderResult::Balance(b)) => rsx! {
-                                            span { class: "provider-summary-amount", "{b.currency} {b.remaining:.2}" }
-                                            if let Some(ref bd) = b.breakdown {
-                                                span { class: "provider-summary-detail",
-                                                    "Paid: {b.currency} {bd.paid:.2} · Granted: {b.currency} {bd.granted:.2}"
-                                                }
-                                            }
-                                        },
-                                        // Kimi merges plan/quota/reset into the detail block
-                                        // below; its summary stays just the provider name.
-                                        Some(balance::ProviderResult::Quota(qs)) => rsx! {
-                                            if current_name.as_str() != "Kimi" {
-                                                if let Some(ref plan) = qs.plan {
-                                                    span { class: "provider-summary-plan", "{plan}" }
-                                                }
-                                                if let Some(q) = qs.quotas.first() {
-                                                    span { class: "provider-summary-amount", "{q.remaining} / {q.limit}" }
-                                                    if let Some(ref reset) = q.reset_at {
-                                                        span { class: "provider-summary-detail", "Resets {reset_label(reset)}" }
-                                                    }
-                                                }
-                                            }
-                                        },
-                                        Some(balance::ProviderResult::Both { balance: b, quotas }) => rsx! {
-                                            span { class: "provider-summary-amount", "{b.currency} {b.remaining:.2}" }
-                                            if !quotas.is_empty() {
-                                                span { class: "provider-summary-detail",
-                                                    "{quotas[0].remaining}/{quotas[0].limit} ({quotas[0].window})"
-                                                }
-                                            }
-                                        },
-                                        None => rsx! {
-                                            if let Some(ref e) = current_err {
-                                                span { class: "provider-summary-amount danger", "⚠ fetch failed" }
-                                                span { class: "provider-summary-detail", "{e}" }
-                                            } else {
-                                                span { class: "provider-summary-amount", "..." }
-                                            }
-                                        },
-                                    }
-                                }
-                                div {
                                     class: "provider-list",
-                                    // Kimi usage monitor detail rides at the top of the
-                                    // scrollable list so a fully populated panel can never
-                                    // squeeze the provider cards out of view.
-                                    if current_name == "Kimi" {
-                                    {
-                                        let hist = kimi_history.read();
-                                        let weekly_view = *hist_weekly.read();
-                                        let hist_bars: Vec<f64> = if weekly_view {
-                                            hist.weekly.iter().map(|c| c.pct).collect()
-                                        } else {
-                                            hist.session.iter().map(|c| c.pct).collect()
-                                        };
-                                        let cost = kimi_cost.read().clone();
-                                        let cost_max = cost
-                                            .as_ref()
-                                            .map(|r| {
-                                                r.daily
-                                                    .iter()
-                                                    .map(|(_, d)| d.cost)
-                                                    .fold(0.0f64, f64::max)
-                                                    .max(1e-9)
-                                            })
-                                            .unwrap_or(1e-9);
-                                        rsx! {
-                                            div {
-                                                class: "kimi-detail",
-                                                // Quota windows with progress bars.
-                                                if let Some(balance::ProviderResult::Quota(qs)) = current_data {
-                                                    if let Some(ref plan) = qs.plan {
-                                                        span { class: "provider-summary-plan", "{plan}" }
+                                    for id in sorted {
+                                        {
+                                            let result = data.get(&id).cloned();
+                                            let err_msg = errs.get(&id).cloned();
+                                            let is_open = expanded_set.contains(&id);
+                                            // Provider TYPE for this instance, from the
+                                            // meta side table. Falls back to "?" if absent.
+                                            let pname = meta.get(&id).cloned().unwrap_or_default();
+                                            let has_key = monitors.iter().any(|m| m.id == id);
+                                            let icon_letter = match pname.as_str() {
+                                                "Kimi" => "K",
+                                                "DeepSeek" => "DS",
+                                                "MiniMax" => "MM",
+                                                "GLM" => "G",
+                                                _ => "?",
+                                            };
+                                            let icon_class = match pname.as_str() {
+                                                "Kimi" => "provider-card-icon kimi",
+                                                "DeepSeek" => "provider-card-icon deepseek",
+                                                "MiniMax" => "provider-card-icon minimax",
+                                                "GLM" => "provider-card-icon glm",
+                                                _ => "provider-card-icon",
+                                            };
+                                            // Compact collapsed summary: first two quota
+                                            // windows (5h + weekly) as "5h 20% · 7d 55%".
+                                            let quick = result.as_ref().and_then(|r| match r {
+                                                balance::ProviderResult::Quota(qs) => {
+                                                    let line = qs.quotas.iter().take(2).map(|q| {
+                                                        let w = if q.window == "weekly" { "7d" } else { q.window.as_str() };
+                                                        format!("{w} {:.0}%", quota_pct(q))
+                                                    }).collect::<Vec<_>>().join(" · ");
+                                                    if line.is_empty() { None } else { Some(line) }
+                                                }
+                                                balance::ProviderResult::Balance(b) => {
+                                                    Some(format!("{:.2}", b.remaining))
+                                                }
+                                                balance::ProviderResult::Both { balance: b, .. } => {
+                                                    Some(format!("{:.2}", b.remaining))
+                                                }
+                                            });
+                                            let id_for_toggle = id.clone();
+                                            // Card title shows the provider TYPE name (e.g.
+                                            // "GLM"); duplicate instances share the title and
+                                            // are told apart by the masked key in the body.
+                                            let title = pname.clone();
+                                            // Pre-compute the cost view + history for this
+                                            // provider so the detail block below stays uniform.
+                                            let weekly_view = *hist_weekly.read();
+                                            let kimi_hist = kimi_history.read();
+                                            let glm_hist = glm_history.read();
+                                            let kimi_cost_r = kimi_cost.read();
+                                            let zcode_cost_r = zcode_cost.read();
+                                            let is_kimi = pname == "Kimi";
+                                            let is_glm = pname == "GLM";
+                                            let hist_bars: Vec<f64> = if is_kimi {
+                                                if weekly_view { kimi_hist.weekly.iter().map(|c| c.pct).collect() }
+                                                else { kimi_hist.session.iter().map(|c| c.pct).collect() }
+                                            } else if is_glm {
+                                                if weekly_view { glm_hist.weekly.iter().map(|c| c.pct).collect() }
+                                                else { glm_hist.session.iter().map(|c| c.pct).collect() }
+                                            } else {
+                                                Vec::new()
+                                            };
+                                            // Cost report as trait object for uniform render.
+                                            let cost_opt: Option<&dyn balance::kimi_local::CostData> = if is_kimi {
+                                                kimi_cost_r.as_ref().map(|r| r as &dyn balance::kimi_local::CostData)
+                                            } else if is_glm {
+                                                zcode_cost_r.as_ref().map(|r| r as &dyn balance::kimi_local::CostData)
+                                            } else {
+                                                None
+                                            };
+                                            let cost_max = cost_opt
+                                                .map(|r| r.daily().iter().map(|(_, d)| d.cost).fold(0.0f64, f64::max).max(1e-9))
+                                                .unwrap_or(1e-9);
+                                            let total_source_reqs: u64 = cost_opt
+                                                .map(|r| r.by_source().iter().map(|s| s.requests).sum())
+                                                .unwrap_or(0);
+                                            let cost_title = if is_glm { "Token cost (est.) · ZCode" } else { "Token cost (est.)" };
+                                            rsx! {
+                                                div {
+                                                    class: if is_open { "coding-card open" } else { "coding-card" },
+                                                    key: "{id}",
+                                                    div {
+                                                        class: "coding-card-header",
+                                                        onclick: move |_| {
+                                                            let mut s = coding_card_expanded.write();
+                                                            if s.contains(&id_for_toggle) {
+                                                                s.remove(&id_for_toggle);
+                                                            } else {
+                                                                s.insert(id_for_toggle.clone());
+                                                            }
+                                                        },
+                                                        div { class: "{icon_class}", "{icon_letter}" }
+                                                        span { class: "coding-card-title", "{title}" }
+                                                        if !is_open {
+                                                            if let Some(ref e) = err_msg {
+                                                                span { class: "coding-card-quick danger", title: "{e}", "⚠ fetch failed" }
+                                                            } else if let Some(q) = quick {
+                                                                span { class: "coding-card-quick", "{q}" }
+                                                            } else {
+                                                                span { class: "coding-card-quick", "—" }
+                                                            }
+                                                        }
+                                                        span {
+                                                            class: if has_key { "coding-card-key-dot on" } else { "coding-card-key-dot off" },
+                                                            title: if has_key { "API key configured" } else { "No API key" },
+                                                        }
+                                                        span { class: "coding-card-chevron", "▸" }
                                                     }
-                                                    for q in &qs.quotas {
-                                                        {
-                                                            let pct = quota_pct(q);
-                                                            rsx! {
-                                                                div { class: "kimi-quota-row", key: "{q.window}",
-                                                                    div { class: "kimi-quota-head",
-                                                                        span { class: "kimi-quota-window", "{q.window}" }
-                                                                        span { class: "kimi-quota-nums", "{q.used}/{q.limit} · {pct:.0}%" }
-                                                                        if let Some(ref reset) = q.reset_at {
-                                                                            span { class: "kimi-quota-reset", "↻ {reset_label(reset)}" }
+                                                    if is_open {
+                                                        div {
+                                                            class: "coding-card-body",
+                                                            // Error banner when fetch failed.
+                                                            if let Some(ref e) = err_msg {
+                                                                div { class: "coding-card-error",
+                                                                    span { "⚠ {e}" }
+                                                                }
+                                                            }
+                                                            // Quota windows with progress bars.
+                                                            if let Some(balance::ProviderResult::Quota(qs)) = &result {
+                                                                if let Some(ref plan) = qs.plan {
+                                                                    span { class: "provider-summary-plan", "{plan}" }
+                                                                }
+                                                                for q in &qs.quotas {
+                                                                    {
+                                                                        let pct = quota_pct(q);
+                                                                        rsx! {
+                                                                            div { class: "kimi-quota-row", key: "{q.window}",
+                                                                                div { class: "kimi-quota-head",
+                                                                                    span { class: "kimi-quota-window", "{q.window}" }
+                                                                                    span { class: "kimi-quota-nums", "{q.used}/{q.limit} · {pct:.0}%" }
+                                                                                    if let Some(ref reset) = q.reset_at {
+                                                                                        span { class: "kimi-quota-reset", "↻ {reset_label(reset)}" }
+                                                                                    }
+                                                                                }
+                                                                                div { class: "provider-bar",
+                                                                                    div { class: bar_class(pct), style: "width: {pct:.0}%;" }
+                                                                                }
+                                                                            }
                                                                         }
                                                                     }
-                                                                    div { class: "provider-bar",
-                                                                        div { class: bar_class(pct), style: "width: {pct:.0}%;" }
+                                                                }
+                                                            }
+                                                            // Per-cycle usage history (5h / weekly peaks).
+                                                            if !hist_bars.is_empty() {
+                                                                div { class: "kimi-block",
+                                                                    div { class: "kimi-block-head",
+                                                                        span { class: "kimi-block-title", "Usage history" }
+                                                                        div { class: "kimi-toggle",
+                                                                            button {
+                                                                                class: if weekly_view { "" } else { "on" },
+                                                                                onclick: move |_| hist_weekly.set(false),
+                                                                                "5h"
+                                                                            }
+                                                                            button {
+                                                                                class: if weekly_view { "on" } else { "" },
+                                                                                onclick: move |_| hist_weekly.set(true),
+                                                                                "7d"
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    div { class: "kimi-chart",
+                                                                        for pct in &hist_bars {
+                                                                            div {
+                                                                                class: "kimi-chart-bar",
+                                                                                style: "height: {pct:.0}%;",
+                                                                                title: "{pct:.0}%",
+                                                                            }
+                                                                        }
                                                                     }
                                                                 }
                                                             }
-                                                        }
-                                                    }
-                                                }
-                                                // Per-cycle usage history (5h / weekly peaks).
-                                                div { class: "kimi-block",
-                                                    div { class: "kimi-block-head",
-                                                        span { class: "kimi-block-title", "Usage history" }
-                                                        div { class: "kimi-toggle",
-                                                            button {
-                                                                class: if weekly_view { "" } else { "on" },
-                                                                onclick: move |_| hist_weekly.set(false),
-                                                                "5h"
-                                                            }
-                                                            button {
-                                                                class: if weekly_view { "on" } else { "" },
-                                                                onclick: move |_| hist_weekly.set(true),
-                                                                "7d"
-                                                            }
-                                                        }
-                                                    }
-                                                    if hist_bars.is_empty() {
-                                                        p { class: "kimi-empty", "No history yet — builds up as quotas are polled." }
-                                                    } else {
-                                                        div { class: "kimi-chart",
-                                                            for pct in hist_bars {
-                                                                div {
-                                                                    class: "kimi-chart-bar",
-                                                                    style: "height: {pct:.0}%;",
-                                                                    title: "{pct:.0}%",
+                                                            // Token usage & equivalent cost.
+                                                            if let Some(report) = cost_opt {
+                                                                div { class: "kimi-block",
+                                                                    div { class: "kimi-block-head",
+                                                                        span { class: "kimi-block-title", "{cost_title}" }
+                                                                    }
+                                                                    div { class: "kimi-cost-grid",
+                                                                        div { class: "kimi-cost-cell",
+                                                                            span { class: "kimi-cost-value", "¥{report.today_cost():.2}" }
+                                                                            span { class: "kimi-cost-label", "Today" }
+                                                                        }
+                                                                        div { class: "kimi-cost-cell",
+                                                                            span { class: "kimi-cost-value", "¥{report.month_cost():.2}" }
+                                                                            span { class: "kimi-cost-label", "30 days" }
+                                                                        }
+                                                                        div { class: "kimi-cost-cell",
+                                                                            span { class: "kimi-cost-value", "{fmt_tokens(report.month_tokens().total())}" }
+                                                                            span { class: "kimi-cost-label", "30d tokens" }
+                                                                        }
+                                                                        div { class: "kimi-cost-cell",
+                                                                            if let Some((_, model, t)) = report.last_request() {
+                                                                                span { class: "kimi-cost-value", "{fmt_tokens(t.total())}" }
+                                                                                span { class: "kimi-cost-label", "{model}" }
+                                                                            } else {
+                                                                                span { class: "kimi-cost-value", "—" }
+                                                                                span { class: "kimi-cost-label", "Last request" }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    span { class: "kimi-cost-today",
+                                                                        "In {fmt_tokens(report.today_tokens().input)} · Out {fmt_tokens(report.today_tokens().output)} · Cache {fmt_tokens(report.today_tokens().cache_read)} · {report.today_requests()} reqs today"
+                                                                    }
+                                                                    if !report.daily().is_empty() {
+                                                                        div { class: "kimi-chart cost",
+                                                                            for (day, d) in report.daily() {
+                                                                                {
+                                                                                    let h = (d.cost / cost_max * 100.0).round().max(2.0) as u64;
+                                                                                    rsx! {
+                                                                                        div {
+                                                                                            class: "kimi-chart-bar cost",
+                                                                                            key: "{day}",
+                                                                                            style: "height: {h}%;",
+                                                                                            title: "{day}: ¥{d.cost:.2} · {fmt_tokens(d.tokens.total())} tokens",
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                                // Request source distribution (ZCode only).
+                                                                if !report.by_source().is_empty() {
+                                                                    div { class: "kimi-block",
+                                                                        div { class: "kimi-block-head",
+                                                                            span { class: "kimi-block-title", "By source" }
+                                                                        }
+                                                                        for s in report.by_source() {
+                                                                            {
+                                                                                let pct = if total_source_reqs > 0 {
+                                                                                    s.requests as f64 / total_source_reqs as f64 * 100.0
+                                                                                } else { 0.0 };
+                                                                                rsx! {
+                                                                                    div { class: "zcode-dim-row", key: "{s.name}",
+                                                                                        span { class: "zcode-dim-name", "{s.name}" }
+                                                                                        div { class: "zcode-dim-bar",
+                                                                                            div { class: "zcode-dim-bar-fill glm", style: "width: {pct:.0}%;" }
+                                                                                        }
+                                                                                        span { class: "zcode-dim-meta", "{s.requests} · {pct:.0}% · {fmt_tokens(s.tokens.total())}" }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
                                                                 }
                                                             }
-                                                        }
-                                                    }
-                                                }
-                                                // Token usage & equivalent cost from local CLI logs.
-                                                if let Some(report) = cost {
-                                                    div { class: "kimi-block",
-                                                        div { class: "kimi-block-head",
-                                                            span { class: "kimi-block-title", "Token cost (est.)" }
-                                                        }
-                                                        div { class: "kimi-cost-grid",
-                                                            div { class: "kimi-cost-cell",
-                                                                span { class: "kimi-cost-value", "¥{report.today_cost:.2}" }
-                                                                span { class: "kimi-cost-label", "Today" }
-                                                            }
-                                                            div { class: "kimi-cost-cell",
-                                                                span { class: "kimi-cost-value", "¥{report.month_cost:.2}" }
-                                                                span { class: "kimi-cost-label", "30 days" }
-                                                            }
-                                                            div { class: "kimi-cost-cell",
-                                                                span { class: "kimi-cost-value", "{fmt_tokens(report.month_tokens.total())}" }
-                                                                span { class: "kimi-cost-label", "30d tokens" }
-                                                            }
-                                                            div { class: "kimi-cost-cell",
-                                                                if let Some((_, ref model, ref t)) = report.last_request {
-                                                                    span { class: "kimi-cost-value", "{fmt_tokens(t.total())}" }
-                                                                    span { class: "kimi-cost-label", "{model}" }
-                                                                } else {
-                                                                    span { class: "kimi-cost-value", "—" }
-                                                                    span { class: "kimi-cost-label", "Last request" }
-                                                                }
-                                                            }
-                                                        }
-                                                        span { class: "kimi-cost-today",
-                                                            "In {fmt_tokens(report.today_tokens.input)} · Out {fmt_tokens(report.today_tokens.output)} · Cache {fmt_tokens(report.today_tokens.cache_read)} · {report.today_requests} reqs today"
-                                                        }
-                                                        if !report.daily.is_empty() {
-                                                            div { class: "kimi-chart cost",
-                                                                for (day, d) in &report.daily {
-                                                                    {
-                                                                        let h = (d.cost / cost_max * 100.0).round().max(2.0) as u64;
-                                                                        rsx! {
-                                                                            div {
-                                                                                class: "kimi-chart-bar cost",
-                                                                                key: "{day}",
-                                                                                style: "height: {h}%;",
-                                                                                title: "{day}: ¥{d.cost:.2} · {fmt_tokens(d.tokens.total())} tokens",
+                                                            // Inline key management for this instance. Cards only render for
+                                                            // already-saved instances, so this is always the "configured" branch:
+                                                            // masked key + Re-fetch + Remove. Adding a new instance (incl. a
+                                                            // duplicate provider) happens via the Add row at the list bottom.
+                                                            {
+                                                                let masked = monitors
+                                                                    .iter()
+                                                                    .find(|m| m.id == id)
+                                                                    .map(|m| {
+                                                                        let k = &m.key;
+                                                                        if k.len() <= 8 {
+                                                                            "••••".to_string()
+                                                                        } else {
+                                                                            format!("{}…{}", &k[..4], &k[k.len() - 3..])
+                                                                        }
+                                                                    });
+                                                                let id_for_delete = id.clone();
+                                                                rsx! {
+                                                                    div { class: "card-key-row",
+                                                                        if let Some(m) = masked {
+                                                                            span { class: "card-key-masked", "{m}" }
+                                                                            button {
+                                                                                class: "card-key-btn",
+                                                                                title: "Re-fetch",
+                                                                                onclick: move |_| {
+                                                                                    spawn(async move {
+                                                                                        refresh_balance(
+                                                                                            balance_data,
+                                                                                            balance_errors,
+                                                                                            balance_meta,
+                                                                                            last_fetch_error,
+                                                                                        ).await;
+                                                                                    });
+                                                                                },
+                                                                                "↻"
+                                                                            }
+                                                                            button {
+                                                                                class: "card-key-btn danger",
+                                                                                title: "Remove",
+                                                                                onclick: move |_| {
+                                                                                    storage::remove_monitor(&id_for_delete);
+                                                                                    saved_keys_version.set(saved_keys_version() + 1);
+                                                                                    spawn(async move {
+                                                                                        refresh_balance(
+                                                                                            balance_data,
+                                                                                            balance_errors,
+                                                                                            balance_meta,
+                                                                                            last_fetch_error,
+                                                                                        ).await;
+                                                                                    });
+                                                                                },
+                                                                                "✕"
                                                                             }
                                                                         }
                                                                     }
@@ -1499,268 +1695,124 @@ fn App() -> Element {
                                             }
                                         }
                                     }
-                                }
-                                    for (i, name) in providers.iter().enumerate() {
-                                        {
-                                            let is_current = i == idx.min(providers.len() - 1);
-                                            let icon_class = match name.as_str() {
-                                                "Kimi" => "provider-card-icon kimi",
-                                                "DeepSeek" => "provider-card-icon deepseek",
-                                                "MiniMax" => "provider-card-icon minimax",
-                                                "GLM" => "provider-card-icon glm",
-                                                _ => "provider-card-icon",
-                                            };
-                                            let result = data.get(*name);
-                                            let err_msg = errs.get(*name).cloned();
-                                            rsx! {
-                                                div {
-                                                    class: if is_current { "provider-card hovered" } else { "provider-card" },
-                                                    key: "{name}",
-                                                    div { class: "{icon_class}",
-                                                        match name.as_str() {
-                                                            "Kimi" => "K",
-                                                            "DeepSeek" => "DS",
-                                                            "MiniMax" => "MM",
-                                                            "GLM" => "G",
-                                                            _ => "?",
-                                                        }
-                                                    }
-                                                    div {
-                                                        class: "provider-card-info",
-                                                        span { class: "provider-card-name", "{name}" }
-                                                        match result {
-                                                            Some(balance::ProviderResult::Quota(qs)) => rsx! {
-                                                                if let Some(q) = qs.quotas.first() {
-                                                                    span { class: "provider-card-detail", "{q.window}: {q.remaining}/{q.limit}" }
-                                                                }
-                                                            },
-                                                            Some(balance::ProviderResult::Balance(b)) => rsx! {
-                                                                if let Some(ref bd) = b.breakdown {
-                                                                    span { class: "provider-card-detail", "P:{bd.paid:.0} G:{bd.granted:.0}" }
-                                                                }
-                                                            },
-                                                            _ => rsx! {
-                                                                if let Some(ref e) = err_msg {
-                                                                    span { class: "provider-card-detail danger",
-                                                                        title: "{e}",
-                                                                        "⚠ {e}"
-                                                                    }
-                                                                }
-                                                            },
-                                                        }
-                                                    }
-                                                    span {
-                                                        class: if result.is_none() && err_msg.is_some() {
-                                                            "provider-card-value danger"
-                                                        } else {
-                                                            "provider-card-value"
-                                                        },
-                                                        match result {
-                                                            Some(balance::ProviderResult::Balance(b)) => format!("{:.2}", b.remaining),
-                                                            Some(balance::ProviderResult::Quota(qs)) => {
-                                                                qs.quotas.first().map(|q| format!("{}/{}", q.remaining, q.limit)).unwrap_or_default()
-                                                            }
-                                                            Some(balance::ProviderResult::Both { balance: b, .. }) => format!("{:.2}", b.remaining),
-                                                            None => {
-                                                                if err_msg.is_some() { "⚠".to_string() } else { "...".to_string() }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    div {
-                        class: "config-section",
-                        div {
-                            class: "config-row",
-                            select {
-                                class: "config-select",
-                                value: "{config_provider.read()}",
-                                onchange: move |evt| config_provider.set(evt.value()),
-                                option { value: "Kimi", "Kimi" }
-                                option { value: "DeepSeek", "DeepSeek" }
-                                option { value: "MiniMax", "MiniMax" }
-                                option { value: "GLM", "GLM" }
-                            }
-                            input {
-                                class: "config-input",
-                                r#type: "password",
-                                value: "{config_key.read()}",
-                                placeholder: "API Key...",
-                                oninput: move |evt| config_key.set(evt.value()),
-                                onkeydown: move |evt| {
-                                    if evt.key() == Key::Escape {
-                                        config_key.set(String::new());
-                                        evt.stop_propagation();
-                                    }
-                                },
-                            }
-                        }
-                        div {
-                            class: "config-actions",
-                            button {
-                                class: "config-btn secondary",
-                                onclick: move |_| {
-                                    spawn(async move {
-                                        let keys = storage::load_all_provider_keys();
-                                        if keys.is_empty() {
-                                            balance_data
-                                                .set(std::collections::HashMap::new());
-                                            balance_errors
-                                                .set(std::collections::HashMap::new());
-                                            return;
-                                        }
-                                        let results = balance::fetch_all(&keys).await;
-                                        let mut map = std::collections::HashMap::new();
-                                        let mut errs = std::collections::HashMap::new();
-                                        let mut first_err = String::new();
-                                        for (name, result) in results {
-                                            match result {
-                                                Ok(data) => {
-                                                    map.insert(name, data);
-                                                }
-                                                Err(e) => {
-                                                    let msg = format!("{name}: {e}");
-                                                    if first_err.is_empty() {
-                                                        first_err = msg.clone();
-                                                    }
-                                                    errs.insert(name, e.to_string());
-                                                }
-                                            }
-                                        }
-                                        balance_data.set(map);
-                                        balance_errors.set(errs);
-                                        last_fetch_error.set(first_err);
-                                    });
-                                },
-                                "↻ Refresh"
-                            }
-                            button {
-                                class: "config-btn primary",
-                                onclick: move |_| {
-                                    let provider = config_provider.read().clone();
-                                    let key = config_key.read().trim().to_string();
-                                    if !key.is_empty() {
-                                        storage::save_provider_key(&provider, &key);
-                                        config_key.set(String::new());
-                                        saved_keys_version.set(saved_keys_version() + 1);
-                                        // Fetch immediately so the user sees the new balance.
-                                        spawn(async move {
-                                            let keys = storage::load_all_provider_keys();
-                                            let results = balance::fetch_all(&keys).await;
-                                            let mut map = std::collections::HashMap::new();
-                                            let mut errs = std::collections::HashMap::new();
-                                            let mut first_err = String::new();
-                                            for (name, result) in results {
-                                                match result {
-                                                    Ok(data) => {
-                                                        map.insert(name, data);
-                                                    }
-                                                    Err(e) => {
-                                                        let msg = format!("{name}: {e}");
-                                                        if first_err.is_empty() {
-                                                            first_err = msg.clone();
-                                                        }
-                                                        errs.insert(name, e.to_string());
-                                                    }
-                                                }
-                                            }
-                                            balance_data.set(map);
-                                            balance_errors.set(errs);
-                                            last_fetch_error.set(first_err);
-                                        });
-                                    }
-                                },
-                                "Save"
-                            }
-                        }
-                        // Saved keys management: lists every persisted provider
-                        // (including ones whose fetch failed) so the user can see
-                        // GLM is actually saved and remove/redo it when needed.
-                        // Reading saved_keys_version() forces a re-read on save/delete.
-                        {
-                            let _v = *saved_keys_version.read();
-                            let saved = storage::load_all_provider_keys();
-                            if saved.is_empty() {
-                                rsx! {}
-                            } else {
-                                // Stable display order: known providers first, then
-                                // any extras alphabetically.
-                                let mut names: Vec<String> = saved.keys().cloned().collect();
-                                names.sort_by_key(|n| match n.as_str() {
-                                    "Kimi" => 0,
-                                    "GLM" => 1,
-                                    "DeepSeek" => 2,
-                                    "MiniMax" => 3,
-                                    _ => 99,
-                                });
-                                rsx! {
-                                    div {
-                                        class: "saved-keys",
-                                        for name in names {
-                                            {
-                                                let key = saved.get(&name).cloned().unwrap_or_default();
-                                                // Mask: "abcd…wxy" — show first 4 and last 3.
-                                                let masked = if key.len() <= 8 {
-                                                    "••••".to_string()
-                                                } else {
-                                                    format!("{}…{}", &key[..4], &key[key.len()-3..])
-                                                };
-                                                let err_for_name = balance_errors.read().get(&name).cloned();
-                                                let name_for_delete = name.clone();
-                                                rsx! {
-                                                    div {
-                                                        class: "saved-key-row",
-                                                        key: "{name}",
-                                                        span {
-                                                            class: "saved-key-name",
-                                                            "{name}"
-                                                        }
-                                                        span {
-                                                            class: if err_for_name.is_some() {
-                                                                "saved-key-value danger"
-                                                            } else {
-                                                                "saved-key-value"
-                                                            },
-                                                            title: if let Some(ref e) = err_for_name { e.clone() } else { String::new() },
-                                                            if err_for_name.is_some() {
-                                                                "⚠ fetch failed"
-                                                            } else {
-                                                                {masked}
-                                                            }
-                                                        }
-                                                        button {
-                                                            class: "saved-key-remove",
-                                                            title: "Remove this API key",
-                                                            onclick: move |_| {
-                                                                storage::remove_provider_key(&name_for_delete);
-                                                                saved_keys_version
-                                                                    .set(saved_keys_version() + 1);
-                                                                // Drop its card/error too.
-                                                                let mut d = balance_data.read().clone();
-                                                                d.remove(&name_for_delete);
-                                                                balance_data.set(d);
-                                                                let mut e = balance_errors.read().clone();
-                                                                e.remove(&name_for_delete);
-                                                                balance_errors.set(e);
-                                                            },
-                                                            "✕"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
+                                    // Persistent one-line "Add monitor" entry at
+                                    // the list bottom: [provider select] [key] [Add].
+                                    // Always visible — no dedup, so adding a second
+                                    // GLM (etc.) just works. The for-loop above only
+                                    // renders cards for instances already saved, so
+                                    // without this row there'd be no way to add one.
+                                    AddMonitorRow {
+                                        add_monitor_provider,
+                                        add_monitor_key,
+                                        saved_keys_version,
+                                        balance_data,
+                                        balance_errors,
+                                        balance_meta,
+                                        last_fetch_error,
                                     }
                                 }
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// One-line "Add monitor" row: [provider select] [API key input] [Add].
+/// Lives at the bottom of the provider list and inside the empty state. Always
+/// visible — no toggle — so there's a permanent entry point for adding the
+/// first, next, or a duplicate provider. On Add: `save_monitor` appends a new
+/// instance (ids like glm-mon-1 / glm-mon-2, never dedupes), then a fresh
+/// fetch makes it appear as its own card.
+#[component]
+fn AddMonitorRow(
+    add_monitor_provider: Signal<String>,
+    add_monitor_key: Signal<String>,
+    saved_keys_version: Signal<u32>,
+    balance_data: Signal<std::collections::HashMap<String, balance::ProviderResult>>,
+    balance_errors: Signal<std::collections::HashMap<String, String>>,
+    balance_meta: Signal<std::collections::HashMap<String, String>>,
+    last_fetch_error: Signal<String>,
+) -> Element {
+    let mut add_monitor_provider = add_monitor_provider;
+    let mut add_monitor_key = add_monitor_key;
+    let mut saved_keys_version = saved_keys_version;
+    let balance_data = balance_data;
+    let balance_errors = balance_errors;
+    let balance_meta = balance_meta;
+    let last_fetch_error = last_fetch_error;
+    let cur_provider = add_monitor_provider.read().clone();
+    let cur_key = add_monitor_key.read().clone();
+    // Persist the draft key and kick off a fetch for the new instance.
+    // Shared closure body (inlined in both Enter and Add-button handlers).
+    rsx! {
+        div {
+            class: "card-key-row monitor-add-row",
+            select {
+                class: "card-key-select",
+                value: "{cur_provider}",
+                onchange: move |evt| {
+                    add_monitor_provider.set(evt.value());
+                },
+                option { value: "Kimi",    "Kimi" }
+                option { value: "GLM",     "GLM" }
+                option { value: "DeepSeek","DeepSeek" }
+                option { value: "MiniMax", "MiniMax" }
+            }
+            input {
+                class: "card-key-input",
+                r#type: "password",
+                value: "{cur_key}",
+                placeholder: "Paste API key...",
+                oninput: move |evt| {
+                    add_monitor_key.set(evt.value());
+                },
+                onkeydown: move |evt| {
+                    if evt.key() == Key::Enter {
+                        let k = add_monitor_key.read().trim().to_string();
+                        if !k.is_empty() {
+                            let prov = add_monitor_provider.read().clone();
+                            storage::save_monitor(&prov, &k);
+                            add_monitor_key.set(String::new());
+                            saved_keys_version.set(saved_keys_version() + 1);
+                            spawn(async move {
+                                refresh_balance(
+                                    balance_data,
+                                    balance_errors,
+                                    balance_meta,
+                                    last_fetch_error,
+                                ).await;
+                            });
+                        }
+                    }
+                    if evt.key() == Key::Escape {
+                        add_monitor_key.set(String::new());
+                        evt.stop_propagation();
+                    }
+                },
+            }
+            button {
+                class: "card-key-btn primary",
+                onclick: move |_| {
+                    let k = add_monitor_key.read().trim().to_string();
+                    if !k.is_empty() {
+                        let prov = add_monitor_provider.read().clone();
+                        storage::save_monitor(&prov, &k);
+                        add_monitor_key.set(String::new());
+                        saved_keys_version.set(saved_keys_version() + 1);
+                        spawn(async move {
+                            refresh_balance(
+                                balance_data,
+                                balance_errors,
+                                balance_meta,
+                                last_fetch_error,
+                            ).await;
+                        });
+                    }
+                },
+                "Add"
             }
         }
     }

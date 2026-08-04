@@ -1560,6 +1560,161 @@ button {
   background: rgba(0, 0, 0, 0.1);
 }
 
+/* Collapsible per-provider card (replaces the old carousel single-card). */
+.coding-card {
+  border-radius: 14px;
+  background: var(--bg-item);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+  flex-shrink: 0;
+  transition: border-color var(--motion-fast) var(--motion-spring);
+}
+.coding-card.open {
+  border-color: rgba(0, 0, 0, 0.08);
+}
+.coding-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--motion-fast) var(--motion-spring);
+}
+.coding-card-header:hover {
+  background: var(--bg-item-hover);
+}
+.coding-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 0 0 auto;
+}
+.coding-card-quick {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.coding-card-quick.danger {
+  color: #ff3b30;
+}
+.coding-card-key-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.coding-card-key-dot.on { background: #34c759; }
+.coding-card-key-dot.off { background: rgba(0, 0, 0, 0.15); }
+.coding-card-chevron {
+  font-size: 10px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  transition: transform 200ms var(--motion-spring);
+}
+.coding-card.open .coding-card-chevron {
+  transform: rotate(90deg);
+}
+.coding-card-body {
+  padding: 2px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: memoSlideIn 260ms var(--motion-spring) both;
+}
+.coding-card-error {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 59, 48, 0.08);
+  font-size: 11px;
+  color: #ff3b30;
+}
+/* Inline key management row inside each card body. */
+.card-key-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+.card-key-masked {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-key-input {
+  flex: 1;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input, rgba(0, 0, 0, 0.02));
+  color: var(--text-primary);
+  min-width: 0;
+}
+.card-key-input:focus {
+  outline: none;
+  border-color: rgba(0, 0, 0, 0.2);
+}
+.card-key-btn {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-item);
+  color: var(--text-primary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--motion-fast) var(--motion-spring);
+}
+.card-key-btn:hover {
+  background: var(--bg-item-hover);
+}
+.card-key-btn.primary {
+  background: var(--accent, #1a1a2e);
+  color: #fff;
+  border-color: transparent;
+}
+.card-key-btn.primary:hover {
+  opacity: 0.88;
+}
+.card-key-btn.danger {
+  color: #ff3b30;
+}
+.card-key-btn.danger:hover {
+  background: rgba(255, 59, 48, 0.1);
+}
+
+/* One-line "Add monitor" row: provider select + key input + Add button.
+   Shares .card-key-row as the base (flex + gap + top border); this just
+   narrows the provider <select> to a fixed chip-like width. */
+.monitor-add-row {
+  margin-top: 8px;
+}
+.card-key-select {
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-item);
+  color: var(--text-primary);
+  flex-shrink: 0;
+  width: 96px;
+  cursor: pointer;
+}
+.card-key-select:focus {
+  outline: none;
+  border-color: rgba(0, 0, 0, 0.2);
+}
+
 .provider-card {
   min-height: 44px;
   display: flex;
@@ -2007,4 +2162,53 @@ button {
 .saved-key-remove:hover {
   background: rgba(255, 59, 48, 0.12);
   color: #ff3b30;
+}
+
+/* ---- ZCode dimension rows (request source / project breakdown) ---- */
+
+.zcode-dim-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.zcode-dim-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  min-width: 72px;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zcode-dim-bar {
+  flex: 1;
+  min-width: 0;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-input);
+  overflow: hidden;
+}
+
+.zcode-dim-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width var(--motion-fast) ease;
+}
+
+.zcode-dim-bar-fill.glm {
+  background: #059669;
+}
+
+.zcode-dim-meta {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 520;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
