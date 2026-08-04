@@ -16,7 +16,10 @@ dioxus = { version = "0.7.9", features = ["desktop"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 time = { version = "0.3", features = ["local-offset", "parsing", "formatting"] }
-reqwest = { version = "0.12", features = ["json"] }
+# default-features = false 干掉 native-tls(schannel) 双后端 + wasm 死代码，
+# 只保留 rustls 单后端（webpki-roots 内置根证书），4 个 provider 全是普通
+# HTTPS GET，无任何 TLS 后端特定 API，切 rustls 行为完全一致。
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # bundled = statically compiles SQLite C source into the binary, so the app
 # stays a single exe with zero external DLL requirements.
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -29,3 +32,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
 ] }
+
+# stock dev 默认 debug = true（全量符号，占 exe 60-80%）。
+# 改成 line-tables-only：保留 panic/crash 的行号定位能力，砍掉变量/类型/内联符号。
+# 不影响 release（自有默认 profile），不影响断点的源码行级定位。
+[profile.dev]
+debug = "line-tables-only"
