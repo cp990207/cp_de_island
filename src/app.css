@@ -552,7 +552,7 @@ button {
 .panel-shell {
   width: 400px;
   flex-shrink: 0;
-  margin-top: 8px;
+  margin-top: 0;
   height: 0;
   opacity: 0;
   transform: scale(0.18, 0.08);
@@ -561,12 +561,14 @@ button {
   overflow: hidden;
   will-change: height, opacity, transform;
   transition: height var(--motion-ui) var(--motion-ease),
+    margin-top var(--motion-ui) var(--motion-ease),
     opacity var(--motion-ui) var(--motion-ease),
     transform var(--motion-ui) var(--motion-ease);
 }
 
 .visual-expanded .panel-shell {
   height: 430px;
+  margin-top: 8px;
   opacity: 1;
   transform: scale(1);
   pointer-events: auto;
@@ -1447,7 +1449,7 @@ button {
 .coding-panel-shell {
   width: 400px;
   flex-shrink: 0;
-  margin-top: 8px;
+  margin-top: 0;
   height: 0;
   opacity: 0;
   transform: scale(0.18, 0.08);
@@ -1456,12 +1458,14 @@ button {
   overflow: hidden;
   will-change: height, opacity, transform;
   transition: height var(--motion-ui) var(--motion-ease),
+    margin-top var(--motion-ui) var(--motion-ease),
     opacity var(--motion-ui) var(--motion-ease),
     transform var(--motion-ui) var(--motion-ease);
 }
 
 .coding-expanded .coding-panel-shell {
   height: 430px;
+  margin-top: 8px;
   opacity: 1;
   transform: scale(1);
   pointer-events: auto;
@@ -1922,4 +1926,85 @@ button {
 
 .side-right.hovered {
   background: rgba(0, 0, 0, 0.03);
+}
+
+/* ---- Per-provider fetch failure states ---- */
+
+.provider-summary-amount.danger,
+.provider-card-detail.danger,
+.provider-card-value.danger,
+.saved-key-value.danger {
+  color: #ff3b30;
+}
+
+.provider-card-detail.danger {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* ---- Saved API keys management list ---- */
+
+.saved-keys {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.saved-key-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 4px;
+  border-radius: 8px;
+  transition: background var(--motion-fast) ease;
+}
+
+.saved-key-row:hover {
+  background: var(--bg-input);
+}
+
+.saved-key-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex-shrink: 0;
+  min-width: 56px;
+}
+
+.saved-key-value {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 520;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.saved-key-remove {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--motion-fast) ease, color var(--motion-fast) ease;
+}
+
+.saved-key-remove:hover {
+  background: rgba(255, 59, 48, 0.12);
+  color: #ff3b30;
 }

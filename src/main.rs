@@ -265,11 +265,20 @@ fn App() -> Element {
     let mut balance_data = use_signal(
         || std::collections::HashMap::<String, balance::ProviderResult>::new(),
     );
+    // Per-provider fetch errors. balance_data only holds successes, so this
+    // map carries the failures — that way a single failed provider (e.g.
+    // GLM) still shows up as a card with its error instead of vanishing
+    // silently when another provider (e.g. Kimi) succeeds.
+    let mut balance_errors =
+        use_signal(|| std::collections::HashMap::<String, String>::new());
     // Config UI state.
     let mut config_provider = use_signal(|| String::from("Kimi"));
     let mut config_key = use_signal(String::new);
     // Last fetch error message (empty when no error or no fetch attempted).
     let mut last_fetch_error = use_signal(String::new);
+    // Bumped whenever a provider key is saved or removed, so the
+    // "saved keys" list in the config section re-reads from disk.
+    let mut saved_keys_version = use_signal(|| 0u32);
     // Kimi quota history (per-cycle peaks) and local token/cost report from
     // the CLI session logs. Both refresh on the same 5-minute cadence.
     let mut kimi_history = use_signal(balance::quota_history::load);
@@ -411,6 +420,7 @@ fn App() -> Element {
             if should_fetch {
                 let results = balance::fetch_all(&keys).await;
                 let mut map = std::collections::HashMap::new();
+                let mut errs = std::collections::HashMap::new();
                 let mut first_err = String::new();
                 let mut history_dirty = false;
                 for (name, result) in results {
@@ -444,9 +454,11 @@ fn App() -> Element {
                             map.insert(name, data);
                         }
                         Err(e) => {
+                            let msg = format!("{name}: {e}");
                             if first_err.is_empty() {
-                                first_err = format!("{name}: {e}");
+                                first_err = msg.clone();
                             }
+                            errs.insert(name, e.to_string());
                         }
                     }
                 }
@@ -455,6 +467,7 @@ fn App() -> Element {
                     kimi_history.set(history.clone());
                 }
                 balance_data.set(map);
+                balance_errors.set(errs);
                 last_fetch_error.set(first_err);
                 last_keys = keys;
                 last_fetch = Some(std::time::Instant::now());
@@ -590,13 +603,21 @@ fn App() -> Element {
     // the same way for the live line and the roll-out overlay.
     let coding_line_at = |idx: usize| -> (String, Option<String>, String) {
         let data = balance_data.read();
-        let providers: Vec<&String> = data.keys().collect();
-        match providers.get(idx.min(providers.len().saturating_sub(1))) {
+        let errs = balance_errors.read();
+        // Provider list = successes ∪ failures, so a fetch that errored (e.g.
+        // GLM) still has a card to show instead of vanishing.
+        let mut names: Vec<&String> = data.keys().collect();
+        for k in errs.keys() {
+            if !names.contains(&k) {
+                names.push(k);
+            }
+        }
+        match names.get(idx.min(names.len().saturating_sub(1))) {
             Some(name) => {
                 let (label, amount) = data
                     .get(*name)
                     .map(coding_pill_line)
-                    .unwrap_or_else(|| (None, "No keys".to_string()));
+                    .unwrap_or_else(|| (None, "Error".to_string()));
                 (name.to_string(), label, amount)
             }
             None => ("none".to_string(), None, "No keys".to_string()),
@@ -975,7 +996,13 @@ fn App() -> Element {
                     },
                     onwheel: move |evt| {
                         let data = balance_data.read();
-                        let providers: Vec<&String> = data.keys().collect();
+                        let errs = balance_errors.read();
+                        let mut providers: Vec<&String> = data.keys().collect();
+                        for k in errs.keys() {
+                            if !providers.contains(&k) {
+                                providers.push(k);
+                            }
+                        }
                         let count = providers.len();
                         if count < 2 {
                             return;
@@ -1239,7 +1266,15 @@ fn App() -> Element {
                     onclick: move |evt: MouseEvent| evt.stop_propagation(),
                     {
                         let data = balance_data.read();
-                        let providers: Vec<&String> = data.keys().collect();
+                        let errs = balance_errors.read();
+                        // Provider list = successes ∪ failures, so a fetch that
+                        // errored (e.g. GLM) still has a card to show.
+                        let mut providers: Vec<&String> = data.keys().collect();
+                        for k in errs.keys() {
+                            if !providers.contains(&k) {
+                                providers.push(k);
+                            }
+                        }
                         let idx = *coding_index.read();
                         if providers.is_empty() {
                             // Distinguish three cases when nothing is shown:
@@ -1279,6 +1314,7 @@ fn App() -> Element {
                         } else {
                             let current_name = providers[idx.min(providers.len() - 1)];
                             let current_data = data.get(current_name);
+                            let current_err = errs.get(current_name).cloned();
                             rsx! {
                                 div {
                                     class: "provider-summary",
@@ -1315,7 +1351,14 @@ fn App() -> Element {
                                                 }
                                             }
                                         },
-                                        None => rsx! { span { class: "provider-summary-amount", "..." } },
+                                        None => rsx! {
+                                            if let Some(ref e) = current_err {
+                                                span { class: "provider-summary-amount danger", "⚠ fetch failed" }
+                                                span { class: "provider-summary-detail", "{e}" }
+                                            } else {
+                                                span { class: "provider-summary-amount", "..." }
+                                            }
+                                        },
                                     }
                                 }
                                 div {
@@ -1468,6 +1511,7 @@ fn App() -> Element {
                                                 _ => "provider-card-icon",
                                             };
                                             let result = data.get(*name);
+                                            let err_msg = errs.get(*name).cloned();
                                             rsx! {
                                                 div {
                                                     class: if is_current { "provider-card hovered" } else { "provider-card" },
@@ -1495,17 +1539,31 @@ fn App() -> Element {
                                                                     span { class: "provider-card-detail", "P:{bd.paid:.0} G:{bd.granted:.0}" }
                                                                 }
                                                             },
-                                                            _ => rsx! {},
+                                                            _ => rsx! {
+                                                                if let Some(ref e) = err_msg {
+                                                                    span { class: "provider-card-detail danger",
+                                                                        title: "{e}",
+                                                                        "⚠ {e}"
+                                                                    }
+                                                                }
+                                                            },
                                                         }
                                                     }
-                                                    span { class: "provider-card-value",
+                                                    span {
+                                                        class: if result.is_none() && err_msg.is_some() {
+                                                            "provider-card-value danger"
+                                                        } else {
+                                                            "provider-card-value"
+                                                        },
                                                         match result {
                                                             Some(balance::ProviderResult::Balance(b)) => format!("{:.2}", b.remaining),
                                                             Some(balance::ProviderResult::Quota(qs)) => {
                                                                 qs.quotas.first().map(|q| format!("{}/{}", q.remaining, q.limit)).unwrap_or_default()
                                                             }
                                                             Some(balance::ProviderResult::Both { balance: b, .. }) => format!("{:.2}", b.remaining),
-                                                            None => "...".to_string(),
+                                                            None => {
+                                                                if err_msg.is_some() { "⚠".to_string() } else { "...".to_string() }
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -1551,10 +1609,15 @@ fn App() -> Element {
                                     spawn(async move {
                                         let keys = storage::load_all_provider_keys();
                                         if keys.is_empty() {
+                                            balance_data
+                                                .set(std::collections::HashMap::new());
+                                            balance_errors
+                                                .set(std::collections::HashMap::new());
                                             return;
                                         }
                                         let results = balance::fetch_all(&keys).await;
                                         let mut map = std::collections::HashMap::new();
+                                        let mut errs = std::collections::HashMap::new();
                                         let mut first_err = String::new();
                                         for (name, result) in results {
                                             match result {
@@ -1562,13 +1625,16 @@ fn App() -> Element {
                                                     map.insert(name, data);
                                                 }
                                                 Err(e) => {
+                                                    let msg = format!("{name}: {e}");
                                                     if first_err.is_empty() {
-                                                        first_err = format!("{name}: {e}");
+                                                        first_err = msg.clone();
                                                     }
+                                                    errs.insert(name, e.to_string());
                                                 }
                                             }
                                         }
                                         balance_data.set(map);
+                                        balance_errors.set(errs);
                                         last_fetch_error.set(first_err);
                                     });
                                 },
@@ -1582,11 +1648,13 @@ fn App() -> Element {
                                     if !key.is_empty() {
                                         storage::save_provider_key(&provider, &key);
                                         config_key.set(String::new());
+                                        saved_keys_version.set(saved_keys_version() + 1);
                                         // Fetch immediately so the user sees the new balance.
                                         spawn(async move {
                                             let keys = storage::load_all_provider_keys();
                                             let results = balance::fetch_all(&keys).await;
                                             let mut map = std::collections::HashMap::new();
+                                            let mut errs = std::collections::HashMap::new();
                                             let mut first_err = String::new();
                                             for (name, result) in results {
                                                 match result {
@@ -1594,18 +1662,101 @@ fn App() -> Element {
                                                         map.insert(name, data);
                                                     }
                                                     Err(e) => {
+                                                        let msg = format!("{name}: {e}");
                                                         if first_err.is_empty() {
-                                                            first_err = format!("{name}: {e}");
+                                                            first_err = msg.clone();
                                                         }
+                                                        errs.insert(name, e.to_string());
                                                     }
                                                 }
                                             }
                                             balance_data.set(map);
+                                            balance_errors.set(errs);
                                             last_fetch_error.set(first_err);
                                         });
                                     }
                                 },
                                 "Save"
+                            }
+                        }
+                        // Saved keys management: lists every persisted provider
+                        // (including ones whose fetch failed) so the user can see
+                        // GLM is actually saved and remove/redo it when needed.
+                        // Reading saved_keys_version() forces a re-read on save/delete.
+                        {
+                            let _v = *saved_keys_version.read();
+                            let saved = storage::load_all_provider_keys();
+                            if saved.is_empty() {
+                                rsx! {}
+                            } else {
+                                // Stable display order: known providers first, then
+                                // any extras alphabetically.
+                                let mut names: Vec<String> = saved.keys().cloned().collect();
+                                names.sort_by_key(|n| match n.as_str() {
+                                    "Kimi" => 0,
+                                    "GLM" => 1,
+                                    "DeepSeek" => 2,
+                                    "MiniMax" => 3,
+                                    _ => 99,
+                                });
+                                rsx! {
+                                    div {
+                                        class: "saved-keys",
+                                        for name in names {
+                                            {
+                                                let key = saved.get(&name).cloned().unwrap_or_default();
+                                                // Mask: "abcd…wxy" — show first 4 and last 3.
+                                                let masked = if key.len() <= 8 {
+                                                    "••••".to_string()
+                                                } else {
+                                                    format!("{}…{}", &key[..4], &key[key.len()-3..])
+                                                };
+                                                let err_for_name = balance_errors.read().get(&name).cloned();
+                                                let name_for_delete = name.clone();
+                                                rsx! {
+                                                    div {
+                                                        class: "saved-key-row",
+                                                        key: "{name}",
+                                                        span {
+                                                            class: "saved-key-name",
+                                                            "{name}"
+                                                        }
+                                                        span {
+                                                            class: if err_for_name.is_some() {
+                                                                "saved-key-value danger"
+                                                            } else {
+                                                                "saved-key-value"
+                                                            },
+                                                            title: if let Some(ref e) = err_for_name { e.clone() } else { String::new() },
+                                                            if err_for_name.is_some() {
+                                                                "⚠ fetch failed"
+                                                            } else {
+                                                                {masked}
+                                                            }
+                                                        }
+                                                        button {
+                                                            class: "saved-key-remove",
+                                                            title: "Remove this API key",
+                                                            onclick: move |_| {
+                                                                storage::remove_provider_key(&name_for_delete);
+                                                                saved_keys_version
+                                                                    .set(saved_keys_version() + 1);
+                                                                // Drop its card/error too.
+                                                                let mut d = balance_data.read().clone();
+                                                                d.remove(&name_for_delete);
+                                                                balance_data.set(d);
+                                                                let mut e = balance_errors.read().clone();
+                                                                e.remove(&name_for_delete);
+                                                                balance_errors.set(e);
+                                                            },
+                                                            "✕"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

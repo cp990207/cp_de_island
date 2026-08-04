@@ -183,6 +183,31 @@ pub fn save_provider_key(provider: &str, key: &str) {
     }
 }
 
+/// Remove a provider's key from providers.json. No-op if the provider isn't
+/// present or the file is missing.
+pub fn remove_provider_key(provider: &str) {
+    let path = providers_file();
+    let mut file = match std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|j| serde_json::from_str::<ProvidersFile>(&j).ok())
+    {
+        Some(f) => f,
+        None => return,
+    };
+    file.api_keys.remove(provider);
+    let Ok(json) = serde_json::to_string_pretty(&file) else {
+        return;
+    };
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, &json).is_err() {
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        eprintln!("[memo-pill] failed to replace {}: {e}", path.display());
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
 pub fn load_all_provider_keys() -> HashMap<String, String> {
     let json = match std::fs::read_to_string(providers_file()) {
         Ok(j) => j,
