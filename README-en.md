@@ -12,7 +12,7 @@ A lightweight "Dynamic Island" style floating widget for Windows, inspired by Ap
 
 ## Current Status
 
-v1.0.0 stable release — a personal-use desktop utility. Everything planned for the first release (quick tasks, Coding Plan usage tracking) is now implemented.
+v1.1.0 stable release — a personal-use desktop utility. Everything planned for the first release (quick tasks, Coding Plan usage tracking) is now implemented.
 
 ## Features
 
