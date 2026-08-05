@@ -8,7 +8,7 @@ pub mod zcode_local;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BalanceInfo {
     pub provider: String,
     pub currency: String,
@@ -19,13 +19,13 @@ pub struct BalanceInfo {
     pub breakdown: Option<BalanceBreakdown>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BalanceBreakdown {
     pub paid: f64,
     pub granted: f64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QuotaInfo {
     pub provider: String,
     pub window: String,
@@ -37,13 +37,13 @@ pub struct QuotaInfo {
 
 /// A provider's quota windows plus the subscription plan name when the API
 /// reports one (e.g. Kimi's membership level).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QuotaSet {
     pub plan: Option<String>,
     pub quotas: Vec<QuotaInfo>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ProviderResult {
     Balance(BalanceInfo),
     Quota(QuotaSet),

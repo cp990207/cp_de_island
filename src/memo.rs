@@ -37,6 +37,32 @@ pub struct Memo {
     pub due: Option<i64>,
 }
 
+/// Active-list ordering, shared by the panel list and the island tips:
+/// due-soonest first (overdue floats to the top on its own), then priority
+/// High → Low, then most recently touched.
+pub fn urgency_cmp(a: &Memo, b: &Memo) -> std::cmp::Ordering {
+    due_rank(a.due)
+        .cmp(&due_rank(b.due))
+        .then(priority_rank(a.priority).cmp(&priority_rank(b.priority)))
+        .then(b.updated_at.cmp(&a.updated_at))
+}
+
+fn due_rank(due: Option<i64>) -> (u8, i64) {
+    match due {
+        Some(t) => (0, t),
+        None => (1, i64::MAX),
+    }
+}
+
+fn priority_rank(p: Option<Priority>) -> u8 {
+    match p {
+        Some(Priority::High) => 0,
+        Some(Priority::Medium) => 1,
+        Some(Priority::Low) => 2,
+        None => 3,
+    }
+}
+
 impl Memo {
     pub fn new(content: String) -> Self {
         let now = unix_now();
