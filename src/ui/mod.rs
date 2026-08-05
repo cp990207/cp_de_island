@@ -62,6 +62,13 @@ pub fn App() -> Element {
         prev_tip_index: use_signal(|| None),
         tip_swap_dir: use_signal(|| 1),
         tip_swap_gen: use_signal(|| 0),
+        coding_tip_index: use_signal(|| 0),
+        coding_wheel_accum: use_signal(|| 0.0),
+        prev_coding_index: use_signal(|| None),
+        coding_swap_dir: use_signal(|| 1),
+        coding_swap_gen: use_signal(|| 0),
+        tip_step_at: use_signal(std::time::Instant::now),
+        coding_step_at: use_signal(std::time::Instant::now),
     };
     let balance = BalanceState {
         data: use_signal(HashMap::new),

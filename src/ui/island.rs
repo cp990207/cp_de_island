@@ -94,37 +94,62 @@ pub fn Island(
         }
     };
 
-    // Island coding pill: show the first provider that has data as a compact
-    // summary line (no carousel — each provider has its own expandable card in
-    // the panel now). Falls back to the first provider name with no amount.
-    let coding_pill_summary = {
+    // Island coding pill: one summary line per saved monitor instance,
+    // cycled with the mouse wheel (wrap-around), mirroring the task tips on
+    // the left side. Ordered like the panel: provider type rank, then
+    // instance id. Each item is (instance id, provider label, summary line);
+    // the line is None when the last fetch errored.
+    let coding_items: Vec<(String, String, Option<String>)> = {
         let data = balance.data.read();
         let errs = balance.errors.read();
         let meta = balance.meta.read();
-        // Instance ids with either data or an error.
         let mut ids: Vec<&String> = data.keys().collect();
         for k in errs.keys() {
             if !ids.contains(&k) {
                 ids.push(k);
             }
         }
-        // Prefer the first instance that actually has balance data. The pill
-        // shows the provider TYPE name (e.g. "GLM"), resolved via meta.
-        let with_data = ids.iter().find_map(|id| {
-            data.get(*id).map(|r| {
-                let label = meta.get(*id).cloned().unwrap_or_else(|| (*id).to_string());
-                (label, format::coding_pill_line(r).1)
-            })
+        ids.sort_by(|a, b| {
+            let rank = |id: &str| meta.get(id).map_or(99, |s| format::provider_rank(s));
+            rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
         });
-        match with_data {
-            Some((name, amount)) => (Some(name), Some(amount)),
-            None => match ids.first() {
-                Some(id) => {
-                    let label = meta.get(*id).cloned().unwrap_or_else(|| (*id).to_string());
-                    (label.into(), None)
-                }
-                None => (None, None),
-            },
+        ids.iter()
+            .map(|id| {
+                let label = meta.get(*id).cloned().unwrap_or_else(|| (*id).to_string());
+                let line = data.get(*id).map(|r| format::coding_pill_line(r).1);
+                ((*id).clone(), label, line)
+            })
+            .collect()
+    };
+    let coding_len = coding_items.len();
+    // The modulo guards against the list shrinking (removed monitors) while
+    // the wheel index points past the new end — same guard as the tips.
+    let current_coding = if coding_len == 0 {
+        None
+    } else {
+        coding_items
+            .get(*island.coding_tip_index.read() % coding_len)
+            .cloned()
+    };
+    let prev_coding = island
+        .prev_coding_index
+        .read()
+        .and_then(|i| coding_items.get(i % coding_len.max(1)).cloned());
+    let coding_roll = if *island.coding_swap_dir.read() > 0 {
+        "roll-up"
+    } else {
+        "roll-down"
+    };
+    let coding_out_gen = *island.coding_swap_gen.read();
+
+    // One coding pill line (provider label + summary), shared by the
+    // roll-in and roll-out layers of the swap animation.
+    let coding_spans = |item: &(String, String, Option<String>)| {
+        rsx! {
+            span { class: "coding-provider-label", "{item.1}" }
+            if let Some(amount) = &item.2 {
+                span { class: "coding-amount", "{amount}" }
+            }
         }
     };
 
@@ -231,18 +256,31 @@ pub fn Island(
                     island.expanded.set(false);
                     island.coding_expanded.toggle();
                 },
+                onwheel: move |evt| {
+                    let dy = match evt.delta() {
+                        WheelDelta::Pixels(v) => v.y,
+                        WheelDelta::Lines(v) => v.y * 16.0,
+                        WheelDelta::Pages(v) => v.y * 160.0,
+                    };
+                    island.scroll_coding(dy, coding_len);
+                },
                 div {
                     class: "coding-content",
                     span { class: "coding-icon" }
                     div {
-                        class: "pill-swap",
-                        div {
-                            class: "pill-swap-line swap-in",
-                            if let Some(label) = coding_pill_summary.0 {
-                                span { class: "coding-provider-label", "{label}" }
+                        class: "pill-swap {coding_roll}",
+                        if let Some(prev) = prev_coding {
+                            div {
+                                class: "pill-swap-line swap-out",
+                                key: "cout-{coding_out_gen}",
+                                {coding_spans(&prev)}
                             }
-                            if let Some(amount) = coding_pill_summary.1 {
-                                span { class: "coding-amount", "{amount}" }
+                        }
+                        if let Some(cur) = current_coding {
+                            div {
+                                class: "pill-swap-line swap-in",
+                                key: "{cur.0}",
+                                {coding_spans(&cur)}
                             }
                         }
                     }

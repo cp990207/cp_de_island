@@ -43,6 +43,19 @@ pub fn coding_pill_line(result: &balance::ProviderResult) -> (Option<String>, St
     }
 }
 
+/// Display order for provider types (Kimi first, then GLM, …). The coding
+/// panel sorts its cards by this and the island pill cycles providers in
+/// the same order, so the two views always agree.
+pub fn provider_rank(name: &str) -> i32 {
+    match name {
+        "Kimi" => 0,
+        "GLM" => 1,
+        "DeepSeek" => 2,
+        "MiniMax" => 3,
+        _ => 99,
+    }
+}
+
 /// Human label for an ISO reset timestamp: today's times show as "HH:MM",
 /// later dates as "M-D HH:MM". Unparseable values pass through unchanged.
 pub fn reset_label(iso: &str) -> String {

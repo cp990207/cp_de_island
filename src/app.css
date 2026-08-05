@@ -534,11 +534,11 @@ button {
 }
 
 .pill-swap .swap-in {
-  animation: swapInFromBelow 340ms var(--motion-spring) both;
+  animation: swapInFromBelow 550ms var(--motion-spring) both;
 }
 
 .pill-swap .swap-out {
-  animation: swapOutToAbove 220ms var(--motion-ease) both;
+  animation: swapOutToAbove 360ms var(--motion-ease) both;
 }
 
 .pill-swap.roll-down .swap-in {

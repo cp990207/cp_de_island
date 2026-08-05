@@ -14,7 +14,7 @@ use crate::memo::{self, Memo, Priority};
 use crate::storage;
 use dioxus::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The task list plus its UI adjuncts (search, undo toast, due-soon flash).
 #[derive(Clone, Copy, PartialEq)]
@@ -77,6 +77,20 @@ pub struct IslandState {
     pub prev_tip_index: Signal<Option<usize>>,
     pub tip_swap_dir: Signal<i8>,
     pub tip_swap_gen: Signal<u64>,
+    /// Coding-side counterpart of the tip carousel: which provider summary
+    /// the right pill shows, cycled with the wheel (wrap-around). Kept
+    /// separate from the task-side signals so switching sides never carries
+    /// state (or stale accumulator) over.
+    pub coding_tip_index: Signal<usize>,
+    pub coding_wheel_accum: Signal<f64>,
+    pub prev_coding_index: Signal<Option<usize>>,
+    pub coding_swap_dir: Signal<i8>,
+    pub coding_swap_gen: Signal<u64>,
+    /// Last time each carousel fired a wheel step. Drives the gesture
+    /// coalescing in `wheel_step_index`: steps closer than its
+    /// `MIN_STEP_INTERVAL` are swallowed, not queued.
+    pub tip_step_at: Signal<Instant>,
+    pub coding_step_at: Signal<Instant>,
 }
 
 /// Coding-side data from the periodic fetch: remote balances, local cost
@@ -242,6 +256,65 @@ impl InputState {
     }
 }
 
+/// Wheel math shared by both pill carousels. Notched wheels fire one event
+/// per click with a large delta; smooth devices (touchpads, smooth-scroll
+/// drivers) stream many small ones. A notch-sized event steps exactly once
+/// and clears the accumulator; small deltas accumulate until a full step.
+/// Either way, two steps never land closer than `MIN_STEP_INTERVAL`: while
+/// the previous roll is still settling, the extra events are swallowed (and
+/// their banked delta dropped) instead of queueing jumps — one physical
+/// scroll gesture = one step. Returns `None` when the index is unchanged.
+fn wheel_step_index(
+    accum: &mut f64,
+    last: &mut Instant,
+    dy: f64,
+    old_idx: usize,
+    len: usize,
+) -> Option<usize> {
+    /// Accumulated pixels per step for smooth devices.
+    const STEP: f64 = 32.0;
+    /// A single event at least this large counts as one wheel notch.
+    const NOTCH: f64 = 16.0;
+    /// Minimum gap between two steps: the roll animation (~550 ms) plus a
+    /// beat, so consecutive rolls never visually overlap.
+    const MIN_STEP_INTERVAL: Duration = Duration::from_millis(700);
+    *accum += dy;
+    if accum.signum() != dy.signum() {
+        // Direction change: drop the stale remainder.
+        *accum = dy;
+    }
+    let mut idx = old_idx;
+    if dy.abs() >= NOTCH {
+        idx = if dy > 0.0 {
+            (idx + 1) % len
+        } else {
+            (idx + len - 1) % len
+        };
+        *accum = 0.0;
+    } else {
+        while *accum >= STEP {
+            idx = (idx + 1) % len;
+            *accum -= STEP;
+        }
+        while *accum <= -STEP {
+            idx = (idx + len - 1) % len;
+            *accum += STEP;
+        }
+    }
+    if idx == old_idx {
+        return None;
+    }
+    let now = Instant::now();
+    if now.duration_since(*last) < MIN_STEP_INTERVAL {
+        // The previous roll is still settling: swallow this step and drop
+        // the banked delta so bursts can never queue up jumps.
+        *accum = 0.0;
+        return None;
+    }
+    *last = now;
+    Some(idx)
+}
+
 impl IslandState {
     pub fn expanded(&self) -> bool {
         *self.expanded.read()
@@ -309,33 +382,23 @@ impl IslandState {
         self.hover_side.set(0);
     }
 
-    /// Wheel-step the tip carousel by the accumulated pixel delta. A full
-    /// wrap lands back on the same tip — no swap. Otherwise the outgoing
-    /// line survives one roll cycle; the generation guard drops it after the
-    /// animation.
+    /// Wheel-step the tip carousel: one notch = one tip, smooth deltas
+    /// accumulate (`wheel_step_index`). A full wrap lands back on the same
+    /// tip — no swap. Otherwise the outgoing line survives one roll cycle;
+    /// the generation guard drops it after the animation.
     pub fn scroll_tips(mut self, dy: f64, tips_len: usize) {
         if tips_len < 2 {
             return;
         }
-        let mut accum = *self.wheel_accum.read() + dy;
-        if accum.signum() != dy.signum() {
-            accum = dy;
-        }
-        const STEP: f64 = 48.0;
+        let mut accum = *self.wheel_accum.read();
+        let mut last = *self.tip_step_at.read();
         let old_idx = *self.tip_index.read();
-        let mut idx = old_idx;
-        while accum >= STEP {
-            idx = (idx + 1) % tips_len;
-            accum -= STEP;
-        }
-        while accum <= -STEP {
-            idx = (idx + tips_len - 1) % tips_len;
-            accum += STEP;
-        }
+        let idx = wheel_step_index(&mut accum, &mut last, dy, old_idx, tips_len);
         self.wheel_accum.set(accum);
-        if idx == old_idx {
+        let Some(idx) = idx else {
             return;
-        }
+        };
+        self.tip_step_at.set(last);
         // Keep the outgoing line for one roll cycle; the generation guard
         // drops it after the animation.
         self.prev_tip_index.set(Some(old_idx));
@@ -344,9 +407,39 @@ impl IslandState {
         let generation = *self.tip_swap_gen.read();
         self.tip_index.set(idx);
         spawn(async move {
-            tokio::time::sleep(Duration::from_millis(400)).await;
+            tokio::time::sleep(Duration::from_millis(600)).await;
             if *self.tip_swap_gen.peek() == generation {
                 self.prev_tip_index.set(None);
+            }
+        });
+    }
+
+    /// Wheel-step the coding pill's provider carousel. Same mechanics as
+    /// `scroll_tips`: one notch = one provider, wraps around both ends, the
+    /// outgoing line survives one roll cycle, and the generation guard drops
+    /// it after the animation.
+    pub fn scroll_coding(mut self, dy: f64, provider_len: usize) {
+        if provider_len < 2 {
+            return;
+        }
+        let mut accum = *self.coding_wheel_accum.read();
+        let mut last = *self.coding_step_at.read();
+        let old_idx = *self.coding_tip_index.read();
+        let idx = wheel_step_index(&mut accum, &mut last, dy, old_idx, provider_len);
+        self.coding_wheel_accum.set(accum);
+        let Some(idx) = idx else {
+            return;
+        };
+        self.coding_step_at.set(last);
+        self.prev_coding_index.set(Some(old_idx));
+        self.coding_swap_dir.set(if dy > 0.0 { 1 } else { -1 });
+        *self.coding_swap_gen.write() += 1;
+        let generation = *self.coding_swap_gen.read();
+        self.coding_tip_index.set(idx);
+        spawn(async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            if *self.coding_swap_gen.peek() == generation {
+                self.prev_coding_index.set(None);
             }
         });
     }
