@@ -15,17 +15,45 @@ pub fn CodingPanel(balance: BalanceState) -> Element {
     // Coding side: per-provider card expand state. Each provider card can be
     // expanded independently (multiple open at once); collapsed cards show a
     // compact 5h/weekly summary, expanded cards show the full detail block.
-    let card_expanded = use_signal(HashSet::<String>::new);
+    let mut card_expanded = use_signal(HashSet::<String>::new);
+    // Default-expand the first card in display order (Kimi first, then GLM,
+    // …) once, when monitor data first arrives — the panel should open onto
+    // real content, not a wall of collapsed rows. Manual toggles afterwards
+    // are respected; removing every monitor re-arms the default.
+    let mut did_default_expand = use_signal(|| false);
+    use_effect(move || {
+        let data = balance.data.read();
+        let errs = balance.errors.read();
+        if data.is_empty() && errs.is_empty() {
+            if *did_default_expand.peek() {
+                did_default_expand.set(false);
+            }
+            return;
+        }
+        if *did_default_expand.peek() {
+            return;
+        }
+        let meta = balance.meta.read();
+        let rank = |id: &str| meta.get(id).map_or(99, |s| format::provider_rank(s));
+        let first = data
+            .keys()
+            .chain(errs.keys())
+            .min_by_key(|id| (rank(id.as_str()), id.to_string()));
+        if let Some(first) = first {
+            card_expanded.write().insert(first.to_string());
+            did_default_expand.set(true);
+        }
+    });
     // History chart view: false = 5h cycles, true = weekly cycles.
     let hist_weekly = use_signal(|| false);
     // Bumped whenever a provider key is saved or removed, so the
     // "saved keys" list re-reads from disk.
     let saved_keys_version = use_signal(|| 0u32);
-    // Always-on "Add monitor" row at the bottom of the provider list: a
-    // one-line form (provider select + key input + Add button) so there's
-    // always a visible entry point. The card list only renders instances
-    // already saved, so without this row there'd be no way to add the very
-    // first (or next, or duplicate) provider.
+    // Always-on "Add monitor" row pinned at the bottom of the panel (below
+    // the scrollable card list): a one-line form (provider select + key
+    // input + Add button) so there's always a visible entry point. The card
+    // list only renders instances already saved, so without this row there'd
+    // be no way to add the very first (or next, or duplicate) provider.
     let add_provider = use_signal(|| String::from("Kimi"));
     let add_key = use_signal(String::new);
 
@@ -97,14 +125,8 @@ pub fn CodingPanel(balance: BalanceState) -> Element {
                         let meta_for_sort = meta.clone();
                         let mut sorted: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
                         sorted.sort_by(|a, b| {
-                            let rank = |id: &str| -> i32 {
-                                match meta_for_sort.get(id).map(|s| s.as_str()) {
-                                    Some("Kimi") => 0,
-                                    Some("GLM") => 1,
-                                    Some("DeepSeek") => 2,
-                                    Some("MiniMax") => 3,
-                                    _ => 99,
-                                }
+                            let rank = |id: &str| {
+                                meta_for_sort.get(id).map_or(99, |s| format::provider_rank(s))
                             };
                             rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
                         });
@@ -131,16 +153,17 @@ pub fn CodingPanel(balance: BalanceState) -> Element {
                                         saved_keys_version,
                                     }
                                 }
-                                // Persistent one-line "Add monitor" entry at
-                                // the list bottom: [provider select] [key] [Add].
-                                // Always visible — no dedup, so adding a second
-                                // GLM (etc.) just works.
-                                AddMonitorRow {
-                                    add_provider,
-                                    add_key,
-                                    saved_keys_version,
-                                    balance,
-                                }
+                            }
+                            // Persistent one-line "Add monitor" entry pinned
+                            // below the scrollable list, at the panel bottom:
+                            // [provider select] [key] [Add]. Always visible —
+                            // no dedup, so adding a second GLM (etc.) just
+                            // works.
+                            AddMonitorRow {
+                                add_provider,
+                                add_key,
+                                saved_keys_version,
+                                balance,
                             }
                         }
                     }
@@ -490,9 +513,10 @@ fn submit_monitor_key(
 }
 
 /// One-line "Add monitor" row: [provider select] [API key input] [Add].
-/// Lives at the bottom of the provider list and inside the empty state. Always
-/// visible — no toggle — so there's a permanent entry point for adding the
-/// first, next, or a duplicate provider. On Add: `save_monitor` appends a new
+/// Pinned at the bottom of the coding panel (outside the scrollable card
+/// list, so it never scrolls away) and also shown inside the empty state.
+/// Always visible — no toggle — so there's a permanent entry point for adding
+/// the first, next, or a duplicate provider. On Add: `save_monitor` appends a new
 /// instance (ids like glm-mon-1 / glm-mon-2, never dedupes), then a fresh
 /// fetch makes it appear as its own card.
 #[component]

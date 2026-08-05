@@ -1694,10 +1694,12 @@ button {
 }
 
 /* One-line "Add monitor" row: provider select + key input + Add button.
-   Shares .card-key-row as the base (flex + gap + top border); this just
-   narrows the provider <select> to a fixed chip-like width. */
+   Shares .card-key-row as the base (flex + gap + top border). In the
+   non-empty panel it's a direct child of .coding-panel (pinned to the panel
+   bottom below the scrollable .provider-list), so it must never shrink. */
 .monitor-add-row {
   margin-top: 8px;
+  flex-shrink: 0;
 }
 .card-key-select {
   font-size: 11px;
